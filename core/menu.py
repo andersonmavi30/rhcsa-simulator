@@ -1107,7 +1107,7 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
 
         # Resolve selections
         chosen = []
-        system_names = {d['device'] for d in all_devs if d['is_system']}
+        safe_names = {d['device'] for d in safe}
         for token in raw.split():
             if token.startswith('/dev/'):
                 dev = token
@@ -1121,8 +1121,8 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
                 except ValueError:
                     print(fmt.error(f"Invalid input: {token}"))
                     return
-            if dev in system_names:
-                print(fmt.error(f"BLOCKED: {dev} is the system disk. Aborting."))
+            if dev not in safe_names:
+                print(fmt.error(f"BLOCKED: {dev} is not an authorized spare disk. Aborting."))
                 return
             if dev not in chosen:
                 chosen.append(dev)
@@ -1160,10 +1160,18 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
         print()
         for dev in chosen:
             print(f"Wiping {dev}...")
-            ok, msgs = wipe_disk(dev)
+            try:
+                ok, msgs = wipe_disk(dev)
+            except Exception as exc:
+                print(fmt.error(f"Wipe failed for {dev}: {exc}"))
+                print(fmt.error("Practice disk selection was NOT saved."))
+                return
             for msg in msgs:
                 print(f"  {msg}")
             print()
+            if not ok:
+                print(fmt.error(f"Wipe failed for {dev}. Practice disk selection was NOT saved."))
+                return
 
         save_practice_device_config('real', chosen)
         print(fmt.success(f"Done. Practice disks: {', '.join(chosen)}"))

@@ -115,110 +115,127 @@ class DeviceManager:
         # Detect practice device on init
         self._detect_practice_device()
 
-    def _detect_practice_device(self) -> Optional[str]:
-        """Detect the practice device (empty disk or practice PV)."""
-        system_vgs = get_system_vgs()
+    def _configured_devices(self) -> Set[str]:
+        """Fail-closed allowlist: selected real disks and simulator-owned loops only."""
+        from utils.helpers import get_practice_device_config
 
-        try:
-            # Use lsblk to find available disks
-            result = subprocess.run(
-                ['lsblk', '-dpno', 'NAME,TYPE,SIZE'],
-                capture_output=True, text=True, timeout=10
-            )
+        cfg = get_practice_device_config()
+        allowed = set()
+        if not isinstance(cfg, dict) or cfg.get('mode') not in ('loop', 'real'):
+            return allowed
+        configured = cfg.get('devices')
+        if not isinstance(configured, list):
+            return allowed
 
-            if result.returncode != 0:
-                return None
-
-            candidates = []
-
-            for line in result.stdout.strip().splitlines():
-                if not line.strip():
+        for candidate in configured:
+            if not isinstance(candidate, str) or not candidate.startswith('/dev/'):
+                continue
+            dev = os.path.realpath(candidate)
+            if is_system_disk(dev):
+                continue
+            if cfg['mode'] == 'loop':
+                if not os.path.basename(dev).startswith('loop'):
                     continue
+                # Only loop images stored in our dedicated simulator directory.
+                try:
+                    probe = subprocess.run(
+                        ['losetup', '-n', '-O', 'BACK-FILE', dev],
+                        capture_output=True, text=True, timeout=5)
+                    backing = probe.stdout.strip().removesuffix(' (deleted)')
+                    root = '/var/lib/rhcsa-simulator/loops'
+                    if (probe.returncode != 0 or not backing or
+                            os.path.commonpath([os.path.realpath(backing), root]) != root):
+                        continue
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    continue
+            else:
+                if os.path.basename(dev).startswith('loop'):
+                    continue
+                # Real disks must still be present and recognized as whole disks.
+                try:
+                    probe = subprocess.run(
+                        ['lsblk', '-dn', '-o', 'TYPE', dev],
+                        capture_output=True, text=True, timeout=5)
+                    if probe.returncode != 0 or probe.stdout.strip() != 'disk':
+                        continue
+                except (OSError, subprocess.SubprocessError):
+                    continue
+            allowed.add(dev)
+        return allowed
+
+    def _is_allowed_pv(self, path: str, allowed: Set[str]) -> bool:
+        """Accept exact configured disks or their direct partitions, not prefixes."""
+        if not path or not path.startswith('/dev/'):
+            return False
+        dev = os.path.realpath(path)
+        if is_system_disk(dev):
+            return False
+        if dev in allowed:
+            return True
+        try:
+            probe = subprocess.run(
+                ['lsblk', '-dn', '-o', 'PKNAME', dev],
+                capture_output=True, text=True, timeout=5)
+            if probe.returncode != 0:
+                return False
+            parent = probe.stdout.strip()
+            return bool(parent and os.path.realpath('/dev/' + parent) in allowed)
+        except (OSError, subprocess.SubprocessError):
+            return False
+
+    def _authorized_vgs(self, allowed: Set[str]) -> Set[str]:
+        """A VG is authorized only when ALL of its physical volumes are ours."""
+        if not allowed:
+            return set()
+        try:
+            probe = subprocess.run(
+                ['pvs', '--noheadings', '-o', 'pv_name,vg_name'],
+                capture_output=True, text=True, timeout=5)
+            if probe.returncode != 0:
+                return set()
+            members = {}
+            for line in probe.stdout.splitlines():
                 parts = line.split()
-                if len(parts) >= 2:
-                    device = parts[0]
-                    dtype = parts[1]
+                if len(parts) == 2:
+                    members.setdefault(parts[1], []).append(parts[0])
+            return {vg for vg, pvs in members.items()
+                    if vg not in get_system_vgs() and
+                    all(self._is_allowed_pv(pv, allowed) for pv in pvs)}
+        except (OSError, subprocess.SubprocessError):
+            return set()
 
-                    if dtype != 'disk':
-                        continue
+    def _source_allowed(self, source: str, allowed: Set[str], vgs: Set[str]) -> bool:
+        """Check exact block source, LVM path or mapper path (including hyphen escape)."""
+        if self._is_allowed_pv(source, allowed):
+            return True
+        if source.startswith('/dev/'):
+            parts = source.split('/')
+            if len(parts) == 4 and parts[2] in vgs:
+                return True
+            if source.startswith('/dev/mapper/'):
+                encoded = source[len('/dev/mapper/'):]
+                return any(encoded.startswith(vg.replace('-', '--') + '-') for vg in vgs)
+            if source.startswith('/dev/dm-'):
+                try:
+                    probe = subprocess.run(
+                        ['dmsetup', 'info', '-c', '--noheadings', '-o', 'name', source],
+                        capture_output=True, text=True, timeout=5)
+                    if probe.returncode == 0:
+                        return any(probe.stdout.strip().startswith(vg.replace('-', '--') + '-')
+                                   for vg in vgs)
+                except (OSError, subprocess.SubprocessError):
+                    return False
+        return False
 
-                    # Skip the disk(s) the OS actually lives on. Determined
-                    # from the live mounts, not from the device name — the OS
-                    # is not always on the first disk.
-                    if is_system_disk(device):
-                        continue
-
-                    # Skip CD-ROM/removable
-                    if 'sr' in device or 'fd' in device:
-                        continue
-
-                    # Skip boot/secondary system disks
-                    if device in ['/dev/sdb', '/dev/sdc']:
-                        # Check if it's part of a system VG
-                        pv_check = subprocess.run(
-                            ['pvs', '--noheadings', '-o', 'pv_name,vg_name', device],
-                            capture_output=True, text=True, timeout=5
-                        )
-                        if pv_check.returncode == 0:
-                            vg_name = pv_check.stdout.split()[-1] if pv_check.stdout.split() else ''
-                            if vg_name in system_vgs:
-                                continue
-
-                    # This is a candidate practice device
-                    candidates.append(device)
-
-            # Prioritize: empty disks first, then disks with non-system PVs
-            for device in candidates:
-                # Check if disk has partitions or children
-                part_result = subprocess.run(
-                    ['lsblk', '-no', 'NAME', device],
-                    capture_output=True, text=True, timeout=5
-                )
-                children = [l.strip() for l in part_result.stdout.strip().splitlines() if l.strip()]
-                has_children = len(children) > 1
-
-                # Check if it's a PV and what VG it belongs to
-                pv_check = subprocess.run(
-                    ['pvs', '--noheadings', '-o', 'pv_name,vg_name', device],
-                    capture_output=True, text=True, timeout=5
-                )
-
-                is_pv = device in pv_check.stdout
-                vg_name = ''
-                if is_pv and pv_check.stdout.strip():
-                    parts = pv_check.stdout.strip().split()
-                    if len(parts) >= 2:
-                        vg_name = parts[-1]
-
-                # Use this device if:
-                # 1. It's empty (no children, not a PV), OR
-                # 2. It's a PV in a non-system VG (practice VG)
-                if not has_children and not is_pv:
-                    self._practice_device = device
-                    self.logger.info(f"Detected practice device: {device} (empty)")
-                    return device
-                elif is_pv and vg_name and vg_name not in system_vgs:
-                    self._practice_device = device
-                    self.logger.info(f"Detected practice device: {device} (has practice LVM: {vg_name})")
-                    return device
-
-            # Fallback: use /dev/sdd if it exists
-            for device in candidates:
-                if 'sdd' in device:
-                    self._practice_device = device
-                    self.logger.info(f"Detected practice device: {device} (fallback)")
-                    return device
-
-            return None
-        except Exception as e:
-            self.logger.warning(f"Error detecting practice device: {e}")
-            return None
+    def _detect_practice_device(self) -> Optional[str]:
+        """Never auto-adopt an unregistered disk, even when it looks unused."""
+        devices = sorted(self._configured_devices())
+        self._practice_device = devices[0] if devices else None
+        return self._practice_device
 
     def get_practice_device(self) -> Optional[str]:
-        """Get the practice device path."""
-        if not self._practice_device:
-            self._detect_practice_device()
-        return self._practice_device
+        """Refresh authorization whenever a device is requested."""
+        return self._detect_practice_device()
 
     # ===== Resource Tracking =====
 
@@ -266,127 +283,59 @@ class DeviceManager:
     # ===== Auto-Detection of Created Resources =====
 
     def scan_for_new_resources(self, task_id: str):
-        """
-        Scan the system for resources that might have been created.
-        Called after task validation to catch any untracked resources.
-        Scans ALL non-system LVM, not just the practice device.
-        """
-        system_vgs = get_system_vgs()
-        device = self.get_practice_device()
-
-        # Check for ALL PVs on non-system VGs (including loop devices)
+        """Discover LVM, mounts, and swaps only on explicitly authorized disks."""
+        allowed = self._configured_devices()
+        if not allowed:
+            return
+        vgs = self._authorized_vgs(allowed)
         try:
             result = subprocess.run(
                 ['pvs', '--noheadings', '-o', 'pv_name,vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    pv_name = parts[0].strip()
-                    vg_name = parts[1].strip()
-                    # Track if it's on practice device, loop device, or non-system VG
-                    is_practice = (device and device in pv_name) or '/dev/loop' in pv_name
-                    is_nonsystem_vg = vg_name not in system_vgs
-                    if is_practice or is_nonsystem_vg:
-                        self.track_resource(ResourceType.PHYSICAL_VOLUME, pv_name, task_id)
-                        if vg_name and vg_name not in system_vgs:
-                            self.track_resource(ResourceType.VOLUME_GROUP, vg_name, task_id)
-        except Exception as e:
-            self.logger.debug(f"Error scanning PVs: {e}")
-
-        # Check for VGs
-        try:
-            result = subprocess.run(
-                ['vgs', '--noheadings', '-o', 'vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            system_vgs = get_system_vgs()
-            for line in result.stdout.strip().splitlines():
-                vg = line.strip()
-                if vg and vg not in system_vgs:
-                    self.track_resource(ResourceType.VOLUME_GROUP, vg, task_id)
-        except Exception:
-            pass
-
-        # Check for LVs in non-system VGs
-        try:
-            result = subprocess.run(
-                ['lvs', '--noheadings', '-o', 'lv_name,vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            system_vgs = get_system_vgs()
-            for line in result.stdout.strip().splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    lv_name = parts[0].strip()
-                    vg_name = parts[1].strip()
-                    if vg_name not in system_vgs:
-                        self.track_resource(
-                            ResourceType.LOGICAL_VOLUME,
-                            f"/dev/{vg_name}/{lv_name}",
-                            task_id,
-                            vg_name=vg_name,
-                            lv_name=lv_name
-                        )
-        except Exception:
-            pass
-
-        # Check for mounts on practice devices, loop devices, or non-system VG LVs
-        try:
-            result = subprocess.run(
-                ['mount'], capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.splitlines():
-                # Skip system mounts
-                if any(x in line for x in ['/boot', '/ type', '/home type', '/var type']):
-                    continue
-
-                should_track = False
-                # Check for practice device
-                if device and device in line:
-                    should_track = True
-                # Check for loop device mounts
-                if '/dev/loop' in line:
-                    should_track = True
-                # Check for mapper devices from non-system VGs
-                if '/dev/mapper/' in line:
-                    mapper_name = line.split()[0].replace('/dev/mapper/', '')
-                    vg_part = mapper_name.split('-')[0]
-                    if vg_part not in system_vgs:
-                        should_track = True
-
-                if should_track:
+                capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
                     parts = line.split()
-                    if len(parts) >= 3:
-                        mount_point = parts[2]
-                        if mount_point.startswith('/mnt/') or mount_point.startswith('/srv/'):
-                            self.track_resource(ResourceType.MOUNT_POINT, mount_point, task_id)
-        except Exception:
-            pass
-
-        # Check for active swap on any non-system device
+                    if parts and self._is_allowed_pv(parts[0], allowed):
+                        self.track_resource(ResourceType.PHYSICAL_VOLUME, parts[0], task_id)
+                        if len(parts) >= 2 and parts[1] in vgs:
+                            self.track_resource(ResourceType.VOLUME_GROUP, parts[1], task_id)
+        except Exception as exc:
+            self.logger.debug('PV scan: %s', exc)
+        if vgs:
+            try:
+                result = subprocess.run(
+                    ['lvs', '--noheadings', '-o', 'lv_path,vg_name'],
+                    capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        parts = line.split()
+                        if len(parts) == 2 and parts[1] in vgs:
+                            self.track_resource(ResourceType.LOGICAL_VOLUME, parts[0], task_id,
+                                                vg_name=parts[1])
+            except Exception as exc:
+                self.logger.debug('LV scan: %s', exc)
         try:
-            result = subprocess.run(
-                ['swapon', '--show=NAME', '--noheadings'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().splitlines():
-                swap_dev = line.strip()
-                should_track = False
-                if device and device in swap_dev:
-                    should_track = True
-                if '/dev/loop' in swap_dev:
-                    should_track = True
-                if 'mapper' in swap_dev:
-                    mapper_name = swap_dev.replace('/dev/mapper/', '')
-                    vg_part = mapper_name.split('-')[0]
-                    if vg_part not in system_vgs:
-                        should_track = True
-                if should_track:
-                    self.track_resource(ResourceType.SWAP, swap_dev, task_id)
-        except Exception:
-            pass
+            result = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 3 and parts[1] == 'on':
+                        source, target = parts[0], parts[2]
+                        if ((target.startswith('/mnt/') or target.startswith('/srv/'))
+                                and self._source_allowed(source, allowed, vgs)):
+                            self.track_resource(ResourceType.MOUNT_POINT, target, task_id)
+        except Exception as exc:
+            self.logger.debug('Mount scan: %s', exc)
+        try:
+            result = subprocess.run(['swapon', '--show=NAME', '--noheadings'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for source in result.stdout.splitlines():
+                    source = source.strip()
+                    if self._source_allowed(source, allowed, vgs):
+                        self.track_resource(ResourceType.SWAP, source, task_id)
+        except Exception as exc:
+            self.logger.debug('Swap scan: %s', exc)
 
     # ===== Cleanup Operations =====
 
@@ -403,6 +352,10 @@ class DeviceManager:
         """
         if not self._cleanup_enabled:
             self.logger.info("Cleanup disabled, skipping")
+            return True
+
+        if self._dry_run:
+            self.logger.info('[DRY RUN] Skipping task cleanup and discovery')
             return True
 
         # First scan for any untracked resources
@@ -437,9 +390,7 @@ class DeviceManager:
                     break
 
         # Always do safety cleanup at the end
-        self._safety_cleanup()
-
-        return all_success
+        return self._safety_cleanup() and all_success
 
     def cleanup_all_resources(self, force: bool = True) -> bool:
         """Clean up ALL tracked resources."""
@@ -490,189 +441,129 @@ class DeviceManager:
             return False
 
     def _safety_cleanup(self) -> bool:
-        """
-        Safety cleanup of ALL practice resources - catches anything missed.
-        Cleans: practice device, loop devices, any non-system LVM.
-        """
-        device = self.get_practice_device()
-        self.logger.info(f"Running safety cleanup (practice device: {device})")
-        success = True
-
-        # Collect all devices to clean (practice device + loop devices with practice LVM)
-        devices_to_clean = set()
-        if device:
-            devices_to_clean.add(device)
-
-        # Find loop devices that have non-system LVM
-        system_vgs = get_system_vgs()
+        """Clean only explicitly authorized practice devices and their LVM."""
+        if self._dry_run:
+            return True
+        allowed = self._configured_devices()
+        if not allowed:
+            self.logger.warning('Cleanup skipped: no authorized practice devices')
+            return False
+        # Refuse partial teardown when a VG spans practice and foreign disks,
+        # or when we cannot obtain a complete PV inventory.
         try:
-            result = subprocess.run(
+            inventory = subprocess.run(
                 ['pvs', '--noheadings', '-o', 'pv_name,vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().splitlines():
+                capture_output=True, text=True, timeout=5)
+            if inventory.returncode != 0:
+                return False
+            members = {}
+            for line in inventory.stdout.splitlines():
                 parts = line.split()
-                if len(parts) >= 2:
-                    pv_name = parts[0].strip()
-                    vg_name = parts[1].strip()
-                    # If this PV is on a loop device and not a system VG, clean it
-                    if '/dev/loop' in pv_name and vg_name not in system_vgs:
-                        devices_to_clean.add(pv_name)
-                    # Also add any non-system PV on other devices
-                    elif vg_name not in system_vgs:
-                        devices_to_clean.add(pv_name)
-        except Exception:
-            pass
-
-        # Last line of defence before pvremove/wipefs: drop anything that is
-        # (or sits on) a disk the OS lives on. The VG-name checks above should
-        # already have excluded these, but steps 5 and 6 below are
-        # unrecoverable, so they get an independent check.
-        protected = {dev for dev in devices_to_clean if is_system_disk(dev)}
-        if protected:
-            self.logger.warning(
-                f"Refusing to clean system device(s): {sorted(protected)}")
-            devices_to_clean -= protected
-
-        self.logger.info(f"Devices to clean: {devices_to_clean}")
-
-        # 1. Unmount anything on practice devices or mapper devices from non-system VGs
-        try:
-            result = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
-            for line in result.stdout.splitlines():
-                should_unmount = False
-                mount_point = None
-
-                # Check if mount is on any device we're cleaning
-                for dev in devices_to_clean:
-                    if dev in line:
-                        should_unmount = True
-                        break
-
-                # Check mapper devices for non-system VGs
-                if '/dev/mapper/' in line:
-                    mapper_name = line.split()[0].replace('/dev/mapper/', '')
-                    vg_part = mapper_name.split('-')[0]
-                    if vg_part not in system_vgs:
-                        should_unmount = True
-
-                if should_unmount:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        mount_point = parts[2]
-                        # Don't unmount system mounts
-                        if mount_point in ['/', '/boot', '/home', '/var', '/tmp']:
-                            continue
-                        subprocess.run(['umount', '-f', mount_point],
-                                       capture_output=True, timeout=10)
-        except Exception as e:
-            self.logger.debug(f"Mount cleanup: {e}")
-
-        # 2. Deactivate any swap on non-system VGs
-        system_vgs = get_system_vgs()
-        try:
-            result = subprocess.run(
-                ['swapon', '--show=NAME', '--noheadings'],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in result.stdout.strip().splitlines():
-                swap_dev = line.strip()
-                should_swapoff = False
-
-                # Check if swap is on our practice device directly
-                if device in swap_dev:
-                    should_swapoff = True
-                # Check if it's a mapper device on a non-system VG
-                elif 'mapper' in swap_dev:
-                    # Extract VG name from /dev/mapper/vgname-lvname
-                    parts = swap_dev.replace('/dev/mapper/', '').split('-')
-                    if parts and parts[0] not in system_vgs:
-                        should_swapoff = True
-                # Check if it's a dm-N device (need to resolve to VG)
-                elif '/dev/dm-' in swap_dev:
-                    # Try to resolve the dm device to its LV
-                    dm_resolve = subprocess.run(
-                        ['dmsetup', 'info', '-c', '--noheadings', '-o', 'name', swap_dev],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if dm_resolve.returncode == 0:
-                        dm_name = dm_resolve.stdout.strip()
-                        # dm_name is like "vg_test-lv_test"
-                        if dm_name:
-                            vg_part = dm_name.split('-')[0]
-                            if vg_part not in system_vgs:
-                                should_swapoff = True
-
-                if should_swapoff:
-                    subprocess.run(['swapoff', swap_dev], capture_output=True, timeout=10)
-        except Exception:
-            pass
-
-        # 3. Remove non-system LVs
-        try:
-            result = subprocess.run(
-                ['lvs', '--noheadings', '-o', 'lv_path,vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            system_vgs = get_system_vgs()
-            for line in result.stdout.strip().splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    lv_path = parts[0].strip()
-                    vg_name = parts[1].strip()
-                    if vg_name not in system_vgs:
-                        subprocess.run(
-                            ['lvremove', '-f', lv_path],
-                            capture_output=True, timeout=15
-                        )
-        except Exception:
-            pass
-
-        # 4. Remove non-system VGs
-        try:
-            result = subprocess.run(
-                ['vgs', '--noheadings', '-o', 'vg_name'],
-                capture_output=True, text=True, timeout=5
-            )
-            system_vgs = get_system_vgs()
-            for line in result.stdout.strip().splitlines():
-                vg = line.strip()
-                if vg and vg not in system_vgs:
-                    subprocess.run(
-                        ['vgremove', '-f', vg],
-                        capture_output=True, timeout=15
-                    )
-        except Exception:
-            pass
-
-        # 5. Remove PVs from all practice devices (including loop devices)
-        for dev in devices_to_clean:
-            try:
-                subprocess.run(
-                    ['pvremove', '-f', '-y', dev],
-                    capture_output=True, timeout=15
-                )
-            except Exception:
-                pass
-
-        # 6. Wipe device signatures on all practice devices
-        for dev in devices_to_clean:
-            try:
-                subprocess.run(
-                    ['wipefs', '-a', dev],
-                    capture_output=True, timeout=15
-                )
-            except Exception:
-                pass
-
-        # 7. Clean up fstab entries for practice mounts
+                if len(parts) == 2:
+                    members.setdefault(parts[1], []).append(parts[0])
+            for vg, paths in members.items():
+                ownership = [self._is_allowed_pv(path, allowed) for path in paths]
+                if any(ownership) and not all(ownership):
+                    self.logger.warning('Refusing mixed-ownership VG %s', vg)
+                    return False
+        except Exception as exc:
+            self.logger.warning('Could not verify PV inventory: %s', exc)
+            return False
+        vgs = self._authorized_vgs(allowed)
+        success = True
+        # Preserve mappings in fstab before removing the associated VGs.
         self._cleanup_practice_fstab_entries()
 
-        self.logger.info("Safety cleanup complete")
+        def run_destructive(args):
+            nonlocal success
+            try:
+                result = subprocess.run(args, capture_output=True, timeout=15)
+                if result.returncode != 0:
+                    success = False
+                    self.logger.warning('Cleanup failed: %s', args)
+            except Exception as exc:
+                success = False
+                self.logger.warning('Cleanup error %s: %s', args, exc)
+
+        try:
+            mounts = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+            if mounts.returncode == 0:
+                for line in mounts.stdout.splitlines():
+                    parts = line.split()
+                    if (len(parts) >= 3 and parts[1] == 'on' and
+                            parts[2] not in ('/', '/boot', '/boot/efi', '/home', '/var', '/tmp')
+                            and self._source_allowed(parts[0], allowed, vgs)):
+                        run_destructive(['umount', '-f', parts[2]])
+            else:
+                success = False
+        except Exception:
+            success = False
+
+        try:
+            swaps = subprocess.run(['swapon', '--show=NAME', '--noheadings'],
+                                   capture_output=True, text=True, timeout=5)
+            if swaps.returncode == 0:
+                for source in swaps.stdout.splitlines():
+                    source = source.strip()
+                    if self._source_allowed(source, allowed, vgs):
+                        run_destructive(['swapoff', source])
+            else:
+                success = False
+        except Exception:
+            success = False
+
+        try:
+            result = subprocess.run(['lvs', '--noheadings', '-o', 'lv_path,vg_name'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) == 2 and parts[1] in vgs:
+                        run_destructive(['lvremove', '-f', parts[0]])
+            else:
+                success = False
+        except Exception:
+            success = False
+
+        if not success:
+            return False
+        for vg in sorted(vgs):
+            run_destructive(['vgremove', '-f', vg])
+        if not success:
+            return False
+
+        try:
+            result = subprocess.run(['pvs', '--noheadings', '-o', 'pv_name,vg_name'],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if parts and self._is_allowed_pv(parts[0], allowed):
+                        run_destructive(['pvremove', '-f', '-y', parts[0]])
+            else:
+                success = False
+        except Exception:
+            success = False
+
+        if not success:
+            return False
+        # Wipe only the configured whole devices, never unrelated /dev/loopN.
+        for dev in sorted(allowed):
+            run_destructive(['wipefs', '-a', dev])
         return success
 
     def _cleanup_mount(self, mount_point: str) -> bool:
         """Unmount a filesystem."""
+        allowed = self._configured_devices()
+        vgs = self._authorized_vgs(allowed)
+        try:
+            probe = subprocess.run(['findmnt', '-n', '-o', 'SOURCE', '--mountpoint', mount_point],
+                                   capture_output=True, text=True, timeout=5)
+            if (probe.returncode != 0 or mount_point in ('/', '/boot', '/home', '/var', '/tmp')
+                    or not self._source_allowed(probe.stdout.strip(), allowed, vgs)):
+                return False
+        except Exception:
+            return False
         result = subprocess.run(
             ['umount', '-f', mount_point],
             capture_output=True, timeout=15
@@ -681,6 +572,9 @@ class DeviceManager:
 
     def _cleanup_swap(self, device: str) -> bool:
         """Deactivate swap."""
+        if not self._source_allowed(device, self._configured_devices(),
+                                    self._authorized_vgs(self._configured_devices())):
+            return False
         result = subprocess.run(
             ['swapoff', device],
             capture_output=True, timeout=15
@@ -693,16 +587,27 @@ class DeviceManager:
 
     def _cleanup_lv(self, lv_path: str, metadata: Dict) -> bool:
         """Remove a logical volume."""
-        # First unmount if mounted
+        allowed = self._configured_devices()
+        vgs = self._authorized_vgs(allowed)
+        if not self._source_allowed(lv_path, allowed, vgs):
+            return False
+        # Only unmount this exact authorized LV's mount sources.
         result = subprocess.run(['mount'], capture_output=True, text=True, timeout=5)
+        if result.returncode != 0:
+            return False
         for line in result.stdout.splitlines():
-            if lv_path in line or (metadata.get('vg_name') and metadata.get('lv_name') and
-                                    f"{metadata['vg_name']}-{metadata['lv_name']}" in line):
-                parts = line.split()
-                if len(parts) >= 3:
-                    subprocess.run(['umount', '-f', parts[2]], capture_output=True, timeout=10)
-
-        # Deactivate swap if this LV is swap
+            parts = line.split()
+            if (len(parts) >= 3 and parts[1] == 'on' and
+                    (parts[0] == lv_path or
+                     (parts[0].startswith('/dev/mapper/') and
+                      self._source_allowed(parts[0], allowed, vgs) and
+                      metadata.get('lv_name') and
+                      parts[0].endswith('-' + str(metadata['lv_name']).replace('-', '--'))))):
+                unmount = subprocess.run(['umount', '-f', parts[2]],
+                                         capture_output=True, timeout=10)
+                if unmount.returncode != 0:
+                    return False
+        # Failure of swapoff for a non-swap LV is expected; do not block.
         subprocess.run(['swapoff', lv_path], capture_output=True, timeout=5)
 
         # Remove the LV
@@ -714,6 +619,8 @@ class DeviceManager:
 
     def _cleanup_vg(self, vg_name: str) -> bool:
         """Remove a volume group."""
+        if vg_name not in self._authorized_vgs(self._configured_devices()):
+            return False
         result = subprocess.run(
             ['vgremove', '-f', vg_name],
             capture_output=True, timeout=15
@@ -722,6 +629,8 @@ class DeviceManager:
 
     def _cleanup_pv(self, device: str) -> bool:
         """Remove a physical volume."""
+        if not self._is_allowed_pv(device, self._configured_devices()):
+            return False
         result = subprocess.run(
             ['pvremove', '-f', '-y', device],
             capture_output=True, timeout=15
@@ -773,68 +682,51 @@ class DeviceManager:
             return False
 
     def _remove_fstab_entry(self, identifier: str) -> bool:
-        """Remove an entry from /etc/fstab matching the identifier."""
+        """Delete only fstab lines whose block sources are explicitly authorized."""
+        allowed = self._configured_devices()
+        vgs = self._authorized_vgs(allowed)
         try:
-            with open('/etc/fstab', 'r') as f:
-                lines = f.readlines()
-
-            new_lines = []
+            with open('/etc/fstab', 'r') as fh:
+                lines = fh.readlines()
+            kept = []
             for line in lines:
-                # Keep the line if it doesn't match our identifier
-                if identifier not in line:
-                    new_lines.append(line)
+                parts = line.split()
+                if (len(parts) >= 2 and not line.lstrip().startswith('#')
+                        and identifier in (parts[0], parts[1])
+                        and self._source_allowed(parts[0], allowed, vgs)):
+                    self.logger.info('Removing authorized fstab entry: %s', line.strip())
                 else:
-                    self.logger.info(f"Removing fstab entry: {line.strip()}")
-
-            with open('/etc/fstab', 'w') as f:
-                f.writelines(new_lines)
-
+                    kept.append(line)
+            if kept != lines:
+                with open('/etc/fstab', 'w') as fh:
+                    fh.writelines(kept)
             return True
-        except Exception as e:
-            self.logger.error(f"Failed to clean fstab: {e}")
+        except Exception as exc:
+            self.logger.error('fstab cleanup failed: %s', exc)
             return False
 
     def _cleanup_practice_fstab_entries(self):
-        """Remove all practice-related entries from fstab."""
-        device = self.get_practice_device()
-        if not device:
+        """Keep unrelated fstab entries; only remove exact authorized block sources."""
+        allowed = self._configured_devices()
+        vgs = self._authorized_vgs(allowed)
+        if not allowed:
             return
-
         try:
-            with open('/etc/fstab', 'r') as f:
-                lines = f.readlines()
-
-            new_lines = []
-            device_basename = device.split('/')[-1]  # e.g., 'sdd' from '/dev/sdd'
-
+            with open('/etc/fstab', 'r') as fh:
+                lines = fh.readlines()
+            kept = []
             for line in lines:
-                # Keep system entries
-                if line.strip().startswith('#') or not line.strip():
-                    new_lines.append(line)
-                    continue
-
-                # Skip entries related to practice
-                skip = False
-                # Check for practice device
-                if device in line or device_basename in line:
-                    skip = True
-                # Check for practice mount points
-                if any(x in line for x in ['/mnt/lvm', '/mnt/data', '/mnt/practice', '/mnt/persistent']):
-                    skip = True
-                # Check for non-system VGs
-                if '/dev/mapper/' in line and not any(x in line for x in ['rl-', 'rl00-', 'rhel-']):
-                    skip = True
-
-                if not skip:
-                    new_lines.append(line)
+                parts = line.split()
+                if (len(parts) >= 2 and not line.lstrip().startswith('#')
+                        and self._source_allowed(parts[0], allowed, vgs)):
+                    self.logger.info('Removing authorized fstab entry: %s', line.strip())
                 else:
-                    self.logger.info(f"Removing practice fstab entry: {line.strip()}")
-
-            with open('/etc/fstab', 'w') as f:
-                f.writelines(new_lines)
-
-        except Exception as e:
-            self.logger.error(f"Failed to clean practice fstab entries: {e}")
+                    kept.append(line)
+            if kept != lines:
+                with open('/etc/fstab', 'w') as fh:
+                    fh.writelines(kept)
+        except Exception as exc:
+            self.logger.error('fstab cleanup failed: %s', exc)
 
     # ===== Context Manager =====
 
