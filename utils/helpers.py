@@ -308,7 +308,32 @@ def wipe_disk(device):
     Returns (success, list_of_messages).
     """
     import subprocess
+    from utils import disk_safety
 
+    config = get_practice_device_config()
+    if not isinstance(config, dict) or config.get("mode") != "real":
+        return False, ["Disk wipe denied: real-disk mode is not configured"]
+
+    configured = config.get("devices", [])
+    if not isinstance(configured, list):
+        return False, ["Disk wipe denied: invalid device allowlist"]
+
+    canonical = disk_safety._canonical_device(device)
+    allowed = {
+        disk_safety._canonical_device(item)
+        for item in configured
+    }
+
+    if canonical is None or canonical not in allowed:
+        return False, ["Disk wipe denied: device is not authorized"]
+
+    if disk_safety.is_system_disk(canonical):
+        return False, ["Disk wipe denied: system disk"]
+
+    if not disk_safety.is_explicit_real_disk(canonical, configured):
+        return False, ["Disk wipe denied: device validation failed"]
+
+    device = canonical
     msgs = []
 
     # 1. Find all partitions on this disk
@@ -324,6 +349,83 @@ def wipe_disk(device):
         path = f"/dev/{name}" if not name.startswith('/') else name
         if path != device:
             all_parts.append(path)
+
+    # Reject mounted filesystems and active swap before modifying disks.
+    mount_result = subprocess.run(
+        ['lsblk', '-nr', '-o', 'MOUNTPOINT', device],
+        capture_output=True,
+        text=True,
+        timeout=10
+    )
+
+    if mount_result.returncode != 0:
+        return False, [
+            "Disk wipe denied: cannot inspect mount points"
+        ]
+
+    if any(line.strip() for line in mount_result.stdout.splitlines()):
+        return False, [
+            "Disk wipe denied: disk contains mounted filesystems or swap"
+        ]
+
+    # Safety preflight: inspect every PV belonging to a VG.
+    # Reject shared VGs before running any destructive command.
+    if part_result.returncode != 0:
+        return False, ["Disk wipe denied: cannot verify disk partitions"]
+
+    pv_result = subprocess.run(
+        ['pvs', '--noheadings', '-o', 'pv_name,vg_name'],
+        capture_output=True, text=True, timeout=10
+    )
+    if pv_result.returncode != 0:
+        return False, ["Disk wipe denied: cannot inspect LVM ownership"]
+
+    owned_paths = {
+        os.path.realpath(path)
+        for path in all_parts + [device]
+    }
+
+    vg_members = {}
+    for line in pv_result.stdout.splitlines():
+        fields = line.split()
+
+        if len(fields) == 1:
+            pv = os.path.realpath(fields[0])
+
+            if pv not in owned_paths:
+                return False, ["Disk wipe denied: unexpected PV"]
+
+            check = subprocess.run(
+                ['pvs', '--noheadings', '-o', 'vg_name', pv],
+                capture_output=True, text=True, timeout=10
+            )
+
+            if check.returncode != 0 or check.stdout.strip():
+                return False, [
+                    "Disk wipe denied: PV ownership is uncertain"
+                ]
+            continue
+
+        if len(fields) != 2:
+            return False, ["Disk wipe denied: unexpected LVM output"]
+
+        pv, vg = fields
+        if not pv.startswith("/dev/") or not vg:
+            return False, ["Disk wipe denied: invalid LVM metadata"]
+
+        vg_members.setdefault(vg, set()).add(os.path.realpath(pv))
+
+    touched_vgs = {
+        vg
+        for vg, members in vg_members.items()
+        if members & owned_paths
+    }
+
+    for vg in touched_vgs:
+        if not vg_members[vg].issubset(owned_paths):
+            return False, [
+                f"Disk wipe denied: VG {vg} contains unauthorized PVs"
+            ]
 
     # 2. Deactivate swap and unmount filesystems on all partitions first
     for dev in all_parts + [device]:
@@ -342,37 +444,75 @@ def wipe_disk(device):
         subprocess.run(['vgremove', '-ff', '-y', vg], capture_output=True, timeout=10)
 
     for dev in all_parts + [device]:
-        subprocess.run(['pvremove', '-ff', '-y', dev], capture_output=True, timeout=10)
+        result = subprocess.run(
+            ['pvremove', '-ff', '-y', dev],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return False, [
+                f"Disk wipe failed: pvremove returned "
+                f"{result.returncode} for {dev}: {result.stderr.strip()}"
+            ]
 
     # 4. Rescan so the kernel drops stale VG references
     subprocess.run(['vgscan', '--cache'], capture_output=True, timeout=10)
 
     # 5. Remove all filesystem/LVM/swap signatures from disk and partitions
     for dev in all_parts + [device]:
-        subprocess.run(['wipefs', '-a', dev], capture_output=True, timeout=10)
+        result = subprocess.run(
+            ['wipefs', '-a', dev],
+            capture_output=True,
+            timeout=10
+        )
+        if result.returncode != 0:
+            return False, [
+                f"Disk wipe failed: wipefs returned "
+                f"{result.returncode} for {dev}"
+            ]
 
-    # 6. Zero out the first and last few MB to destroy partition tables (MBR + GPT)
+    # 6. Zero the first and last MB; check every operation.
     try:
         size_result = subprocess.run(
             ['blockdev', '--getsize64', device],
             capture_output=True, text=True, timeout=10
         )
+        if size_result.returncode != 0:
+            return False, ["Disk wipe failed: cannot read disk size"]
+
         disk_bytes = int(size_result.stdout.strip())
-        # Zero first 2MB (MBR + GPT header)
-        subprocess.run(
-            ['dd', 'if=/dev/zero', f'of={device}', 'bs=1M', 'count=2', 'oflag=direct'],
-            capture_output=True, timeout=30
-        )
-        # Zero last 1MB (GPT backup header)
-        skip_mb = disk_bytes // (1024 * 1024) - 1
-        subprocess.run(
-            ['dd', 'if=/dev/zero', f'of={device}', 'bs=1M', 'count=1',
-             f'seek={skip_mb}', 'oflag=direct'],
-            capture_output=True, timeout=30
-        )
+        if disk_bytes < 3 * 1024 * 1024:
+            return False, ["Disk wipe failed: disk size is too small"]
+
+        commands = [
+            [
+                'dd', 'if=/dev/zero', f'of={device}',
+                'bs=1M', 'count=2', 'oflag=direct'
+            ],
+            [
+                'dd', 'if=/dev/zero', f'of={device}',
+                'bs=1M', 'count=1',
+                f'seek={disk_bytes // (1024 * 1024) - 1}',
+                'oflag=direct'
+            ],
+        ]
+
+        for command in commands:
+            result = subprocess.run(
+                command,
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode != 0:
+                return False, [
+                    f"Disk wipe failed: dd returned "
+                    f"{result.returncode}: {result.stderr.strip()}"
+                ]
+
         msgs.append(f"Partition table wiped on {device}")
-    except Exception as e:
-        msgs.append(f"Warning: could not zero partition table on {device}: {e}")
+
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        return False, [f"Disk wipe failed during dd: {exc}"]
 
     # 7. Tell kernel to re-read
     subprocess.run(['partprobe', device], capture_output=True, timeout=10)
@@ -1056,9 +1196,19 @@ def build_device_pool(min_loops=3):
     """Ordered list of distinct practice devices: loop devices (>= min_loops)
     first, then spare non-system real disks (e.g. /dev/sda)."""
     pool = list(ensure_loop_devices(min_loops))
-    for dev in get_spare_real_disks():
-        if dev not in pool:
-            pool.append(dev)
+    cfg = get_practice_device_config()
+
+    # Real disks require explicit registration and live validation.
+    if cfg and cfg.get('mode') == 'real':
+        from utils.disk_safety import is_explicit_real_disk
+
+        configured = cfg.get('devices', [])
+        if isinstance(configured, list):
+            for dev in configured:
+                if (is_explicit_real_disk(dev, configured)
+                        and dev not in pool):
+                    pool.append(dev)
+
     return pool
 
 
