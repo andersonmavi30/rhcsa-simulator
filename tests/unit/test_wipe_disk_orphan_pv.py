@@ -1,5 +1,10 @@
 
-"""Regression test for a PV without a volume group."""
+"""
+RHCSA Simulator - Orphan PV Regression Test.
+
+Verify that a PV without a VG is handled correctly.
+All subprocess calls are mocked.
+"""
 
 import subprocess
 from unittest.mock import patch
@@ -8,11 +13,20 @@ from utils import helpers
 
 
 def fake_run(command, **kwargs):
-    if command[0] == "lsblk":
-        if "MOUNTPOINT" in command:
-            return subprocess.CompletedProcess(command, 0, "\n\n", "")
+    if command[:3] == ["lsblk", "-rno", "NAME"]:
         return subprocess.CompletedProcess(
             command, 0, "sdb\nsdb1\n", ""
+        )
+
+    if command[:4] == ["lsblk", "-dn", "-o", "TYPE,PKNAME"]:
+        if command[-1] == "/dev/sdb1":
+            return subprocess.CompletedProcess(
+                command, 0, "part sdb\n", ""
+            )
+
+    if command[0] == "lsblk" and "MOUNTPOINT" in command:
+        return subprocess.CompletedProcess(
+            command, 0, "\n\n", ""
         )
 
     if command[0] == "pvs":
@@ -20,7 +34,10 @@ def fake_run(command, **kwargs):
             return subprocess.CompletedProcess(
                 command, 0, "/dev/sdb1 \n", ""
             )
-        return subprocess.CompletedProcess(command, 0, "\n", "")
+
+        return subprocess.CompletedProcess(
+            command, 0, "\n", ""
+        )
 
     if command[0] == "blockdev":
         return subprocess.CompletedProcess(

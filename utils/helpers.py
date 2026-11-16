@@ -350,6 +350,31 @@ def wipe_disk(device):
         if path != device:
             all_parts.append(path)
 
+    # Verify that every discovered device is a direct partition.
+    # Reject LVM descendants or devices belonging to another disk.
+    for partition in all_parts:
+        probe = subprocess.run(
+            ['lsblk', '-dn', '-o', 'TYPE,PKNAME', partition],
+            capture_output=True, text=True, timeout=10
+        )
+
+        if probe.returncode != 0:
+            return False, [
+                f"Disk wipe denied: cannot verify {partition}"
+            ]
+
+        fields = probe.stdout.strip().split()
+        if len(fields) != 2 or fields[0] != 'part':
+            return False, [
+                f"Disk wipe denied: unexpected block device {partition}"
+            ]
+
+        parent = os.path.realpath('/dev/' + fields[1])
+        if parent != device:
+            return False, [
+                f"Disk wipe denied: {partition} belongs to another disk"
+            ]
+
     # Reject mounted filesystems and active swap before modifying disks.
     mount_result = subprocess.run(
         ['lsblk', '-nr', '-o', 'MOUNTPOINT', device],
@@ -443,7 +468,17 @@ def wipe_disk(device):
         subprocess.run(['vgchange', '-an', vg], capture_output=True, timeout=10)
         subprocess.run(['vgremove', '-ff', '-y', vg], capture_output=True, timeout=10)
 
+    # Only remove LVM metadata from confirmed, authorized PVs.
+    known_pvs = {
+        os.path.realpath(line.split()[0])
+        for line in pv_result.stdout.splitlines()
+        if line.split()
+    }
+
     for dev in all_parts + [device]:
+        if os.path.realpath(dev) not in known_pvs:
+            continue
+
         result = subprocess.run(
             ['pvremove', '-ff', '-y', dev],
             capture_output=True,

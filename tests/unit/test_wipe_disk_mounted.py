@@ -1,11 +1,9 @@
 
 """
-RHCSA Simulator - Mounted Disk Safety Test
+RHCSA Simulator - Mounted Disk Safety Test.
 
-Verify that mounted disks are rejected before modification.
-
-All system commands are mocked.
-No real disks are accessed or modified.
+Verify mounted disks are rejected before destructive operations.
+All subprocess calls are mocked.
 """
 
 import subprocess
@@ -15,31 +13,28 @@ from utils import helpers
 
 
 def fake_run(command, **kwargs):
-    """Simulate a disk with a mounted partition."""
-
     if command[:3] == ["lsblk", "-rno", "NAME"]:
         return subprocess.CompletedProcess(
             command, 0, "sdb\nsdb1\n", ""
         )
+
+    if command[:4] == ["lsblk", "-dn", "-o", "TYPE,PKNAME"]:
+        if command[-1] == "/dev/sdb1":
+            return subprocess.CompletedProcess(
+                command, 0, "part sdb\n", ""
+            )
 
     if command[0] == "lsblk" and "MOUNTPOINT" in command:
         return subprocess.CompletedProcess(
             command, 0, "\n/mnt/important\n", ""
         )
 
-    if command[0] == "pvs":
-        return subprocess.CompletedProcess(
-            command, 0, "", ""
-        )
-
     raise AssertionError(
-        f"Mounted disk triggered unexpected command: {command}"
+        f"Unexpected or destructive command: {command}"
     )
 
 
 def test_mounted_disk_must_be_rejected():
-    """Never modify a disk containing mounted filesystems."""
-
     config = {
         "mode": "real",
         "devices": ["/dev/sdb"],
@@ -64,5 +59,5 @@ def test_mounted_disk_must_be_rejected():
         success, messages = helpers.wipe_disk("/dev/sdb")
 
     assert success is False
-    assert messages
+    assert any("mounted" in msg for msg in messages)
 
