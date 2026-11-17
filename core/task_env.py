@@ -1,5 +1,4 @@
-"""
-Shared task-environment lifecycle for training sessions (practice + adaptive).
+"""Shared task-environment lifecycle for training sessions (practice + adaptive).
 
 Exam mode already resets the box and prepares each task's preconditions
 (reset practice disks + clean lab leftovers at start; inject_fault /
@@ -18,38 +17,50 @@ from utils import formatters as fmt
 logger = logging.getLogger(__name__)
 
 
+def _report_cleanup_error(operation, error, verbose=True):
+    """Log cleanup failures and show a concise warning to interactive users."""
+    logger.error("%s failed: %s", operation, error)
+    if verbose:
+        print(fmt.warning(f"  {operation} failed; the environment may not be clean."))
+
+
 def session_reset(verbose=True):
     """Start-of-session reset: fresh practice disks + remove leftover artifacts.
 
     Mirrors ExamSession.start(): helpers.reset_practice_loops() followed by
-    lab_cleanup.clean(). Safe to call when there are no loop devices or no
-    leftovers — both operations no-op cleanly.
+    lab_cleanup.clean(). Returns the cleaned artifact list, as before. Failures
+    are reported instead of being silently hidden.
     """
     from utils import helpers
+
     # First restore any faults/preconditions still active from a previous
     # session — exams deliberately leave the environment in place for review
     # and disputes, so the NEXT session is where it gets undone.
     try:
         from tasks.troubleshooting import restore_any_active_fault
         restore_any_active_fault()
-    except Exception:
-        pass
+    except Exception as exc:
+        _report_cleanup_error("Restoring a previous troubleshooting fault", exc, verbose)
+
     try:
         helpers.reset_practice_loops()
-    except Exception:
-        pass
+    except Exception as exc:
+        _report_cleanup_error("Resetting practice disks", exc, verbose)
+
     # Clear a stale exam countdown left by an interrupted exam.
     try:
         from core import exam_clock
         exam_clock.stop()
-    except Exception:
-        pass
-    done = []
+    except Exception as exc:
+        logger.warning("Could not stop a stale exam clock: %s", exc)
+
     try:
         from core import lab_cleanup
         done = lab_cleanup.clean(dry_run=False)
-    except Exception:
+    except Exception as exc:
+        _report_cleanup_error("Cleaning leftover lab artifacts", exc, verbose)
         done = []
+
     if verbose and done:
         print(fmt.dim(f"Cleaned {len(done)} leftover lab artifact(s) from a previous session."))
     return done
@@ -63,8 +74,10 @@ def prepare_session(tasks, verbose=True):
     try:
         from core import preflight
         preflight.offer_task_packages(tasks)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Task package preflight failed: %s", exc)
+        if verbose:
+            print(fmt.warning("Package preflight failed; check the log if a task needs missing software."))
 
 
 def setup_task(task, verbose=True):
@@ -131,28 +144,36 @@ def teardown_task(task, state, verbose=True):
             ok, msg = task.restore_fault()
             if verbose:
                 print(fmt.dim(f"  {msg}") if ok else fmt.error(f"  Restore error: {msg}"))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Could not restore injected fault for %s", getattr(task, 'id', '?'))
+            if verbose:
+                print(fmt.error("  Could not restore the task fault; check the log."))
     if state.get('setup'):
         try:
             task.teardown_environment()
         except Exception:
-            pass
+            logger.exception("Could not tear down task environment for %s", getattr(task, 'id', '?'))
+            if verbose:
+                print(fmt.error("  Could not restore the task starting state; check the log."))
 
 
 def reset_after_task(task):
-    """Between iterations, wipe practice disks if the finished task consumed one,
-    so the next disk task starts from clean, signature-free disks.
+    """Between iterations, reset practice disks if the task consumed one.
 
     Non-disk tasks skip this (nothing to reset), keeping the session snappy.
+    Returns True when no reset was needed or the reset completed; False when
+    cleanup failed, so callers can report that the next task may inherit state.
     """
     if getattr(task, 'disk_slots', 0) <= 0:
-        return
+        return True
     from utils import helpers
     try:
         helpers.reset_practice_loops()
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        logger.exception("Could not reset practice disks after task %s", getattr(task, 'id', '?'))
+        print(fmt.warning("  Practice disk reset failed; the next task may inherit disk state."))
+        return False
 
 
 def session_teardown(tasks, verbose=True):
@@ -161,10 +182,7 @@ def session_teardown(tasks, verbose=True):
 
     It (1) reverses every task's injected fault / negative precondition, then
     (2) removes leftover lab artifacts and resets practice disks (same as the
-    start-of-session reset). Both steps are idempotent and swallow errors: the
-    per-task restore records are cleared as they replay, so calling this twice —
-    e.g. once at normal end and again from an outer finally — is a harmless
-    no-op. Safe to call even if setup never ran (empty/None tasks is fine).
+    start-of-session reset). Safe to call even if setup never ran.
     """
     if verbose:
         print(fmt.dim("Restoring the machine to a clean state..."))
@@ -173,12 +191,12 @@ def session_teardown(tasks, verbose=True):
             try:
                 task.restore_fault()
             except Exception:
-                pass
+                logger.exception("Could not restore injected fault for %s", getattr(task, 'id', '?'))
         if getattr(task, 'has_setup', False):
             try:
                 task.teardown_environment()
             except Exception:
-                pass
+                logger.exception("Could not tear down task environment for %s", getattr(task, 'id', '?'))
     # Remove candidate-created artifacts (files, mounts, swap, units, …) and
     # reset practice disks so the box is back to a clean, vanilla state.
     session_reset(verbose=False)

@@ -259,7 +259,8 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
     def reset_machine(self):
         """THE single reset. Restores any active faults/preconditions, removes
         every practice artifact (lab files, disks, swap, repos, flatpaks,
-        scheduled jobs, autofs, tuned, NFS exports, practice users) and returns
+        simulator-owned cron files, known practice autofs maps, tuned, NFS
+        exports, practice users) and returns
         the box to a clean basic-RHEL state. Preserves the simulator,
         GitHub/SSH connectivity, networking, SELinux and the OS.
 
@@ -277,7 +278,8 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
         print("  - all third-party DNF repos (RHEL system repos are kept)")
         print("  - all Flatpak apps and remotes")
         print("  - leftover lab files, practice users/groups, practice disks & swap")
-        print("  - scheduled jobs, autofs maps, tuned changes, NFS exports")
+        print("  - simulator cron files, practice Autofs maps, tuned changes, NFS exports")
+        print("  - user crontabs, pending at jobs, and unrelated Autofs config are preserved")
         print()
         print(fmt.success("PRESERVED: the rhcsa-simulator, GitHub/SSH auth (gh, ~/.ssh,"))
         print(fmt.success("git config), networking, firewall, SELinux, and the OS itself."))
@@ -296,7 +298,7 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
             if len(items) > 8:
                 print(fmt.dim(f"      … and {len(items) - 8} more"))
             total += len(items)
-        print(fmt.dim("  (plus dnf cache, cron/at jobs, autofs, tuned, NFS exports)"))
+        print(fmt.dim("  (plus dnf cache, simulator cron files, tuned, NFS exports)"))
         print()
 
         remove_users = confirm_action(
@@ -1046,11 +1048,21 @@ For RHCSA exam info: https://www.redhat.com/rhcsa
 
         elif choice == '4':
             print()
-            mode_desc = "real disk(s)" if cfg and cfg['mode'] == 'real' else "loop devices"
-            print(fmt.warning(f"This removes all LVM/swap structures from practice {mode_desc}."))
-            if cfg and cfg['mode'] == 'real':
-                print(fmt.warning("Partition tables on real disks are NOT touched."))
-            if confirm_action("Continue?", default=False):
+            real_disk_mode = bool(cfg and cfg.get('mode') == 'real')
+            if real_disk_mode:
+                print(fmt.error("THIS WILL COMPLETELY WIPE THE CONFIGURED REAL DISK(S)."))
+                print(fmt.warning("All partitions, partition tables, signatures, and data will be destroyed."))
+                print(fmt.warning("The disks will be left as raw, unpartitioned devices."))
+                print()
+                confirm = input("Type WIPE to continue: ").strip()
+                confirmed = confirm == 'WIPE'
+                if not confirmed:
+                    print(fmt.dim("Cancelled — no disks were wiped."))
+            else:
+                print(fmt.warning("This removes practice loop devices, their LVM/swap structures, and backing images."))
+                confirmed = confirm_action("Continue?", default=False)
+
+            if confirmed:
                 if cleanup_practice_devices():
                     print(fmt.success("Practice devices cleaned up"))
                 else:

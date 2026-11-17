@@ -873,64 +873,57 @@ def create_practice_devices(count=3, size_mb=500):
 def cleanup_practice_devices():
     """
     Clean up practice devices based on the saved configuration.
-    - Loop mode: deactivate swap, remove LVM, detach loops, delete images.
-    - Real disk mode: remove LVM structures from configured disks (does NOT
-      wipe partition tables — user's data, user's responsibility).
-    Also removes the practice device config file.
+
+    Real-disk mode delegates each authorized device to wipe_disk(), which
+    performs the safety checks and destructive cleanup. If any wipe fails,
+    preserve the configuration so the user can inspect and retry it.
+
+    Loop mode removes stray practice VGs, purges each simulator loop device,
+    and deletes the backing images. The configuration file is removed only
+    after the selected cleanup path completes.
     """
-    import subprocess
     import os
 
     loop_dir = '/var/lib/rhcsa-simulator/loops'
     cfg = get_practice_device_config()
 
     try:
-        if cfg and cfg['mode'] == 'real':
-            # Wipe all practice disks completely (partition table + data)
-            for device in cfg.get('devices', []):
-                wipe_disk(device)
+        if isinstance(cfg, dict) and cfg.get('mode') == 'real':
+            devices = cfg.get('devices', [])
+            if not isinstance(devices, list):
+                print("Error cleaning up: invalid real-disk device list")
+                return False
+
+            # wipe_disk() enforces authorization and disk-safety policy.
+            # Never discard the saved config if a requested wipe is denied
+            # or fails, so the operation can be reviewed and retried.
+            for device in devices:
+                result = wipe_disk(device)
+                if not isinstance(result, tuple) or len(result) != 2:
+                    print(f"Error cleaning up: unexpected wipe result for {device}")
+                    return False
+
+                success, messages = result
+                for message in messages:
+                    print(message)
+                if not success:
+                    return False
         else:
-            # Loop mode cleanup
+            # Remove interrupted-session VGs before purging loops; active
+            # device-mapper mappings can otherwise keep loop devices open.
+            _remove_stray_practice_vgs()
+
             devices = get_loop_devices()
+            if not isinstance(devices, list):
+                print("Error cleaning up: invalid loop-device list")
+                return False
+
             swap_dev = get_swap_practice_device()
             if swap_dev and swap_dev not in devices:
                 devices.append(swap_dev)
 
             for device in devices:
-                # Unmount and deactivate partitions first, then the whole loop
-                part_result = subprocess.run(
-                    ['lsblk', '-rno', 'NAME,MOUNTPOINT', device],
-                    capture_output=True, text=True, timeout=10
-                )
-                for line in part_result.stdout.splitlines():
-                    parts = line.split()
-                    name = parts[0]
-                    mnt = parts[1] if len(parts) > 1 else ''
-                    part_dev = f'/dev/{name}'
-                    if part_dev == device:
-                        continue
-                    subprocess.run(['swapoff', part_dev], capture_output=True, timeout=10)
-                    if mnt.startswith('/'):
-                        subprocess.run(['umount', '-f', part_dev], capture_output=True, timeout=10)
-                subprocess.run(['swapoff', device], capture_output=True, timeout=10)
-                # Deactivate any VGs on this loop device before pvremove
-                all_devs = [f'/dev/{ln.split()[0]}' for ln in part_result.stdout.splitlines() if ln.split()]
-                vg_res = subprocess.run(
-                    ['pvs', '--noheadings', '-o', 'vg_name'] + all_devs,
-                    capture_output=True, text=True, timeout=10
-                )
-                for vg in {v.strip() for v in vg_res.stdout.splitlines() if v.strip()}:
-                    subprocess.run(['vgchange', '-an', vg], capture_output=True, timeout=10)
-                    subprocess.run(['vgremove', '-ff', '-y', vg], capture_output=True, timeout=10)
-                for line in part_result.stdout.splitlines():
-                    p = line.split()
-                    if p:
-                        subprocess.run(['pvremove', '-ff', '-y', f'/dev/{p[0]}'],
-                                       capture_output=True, timeout=10)
-                subprocess.run(['pvremove', '-ff', '-y', device],
-                               capture_output=True, timeout=10)
-                subprocess.run(['losetup', '-d', device],
-                               capture_output=True, timeout=10)
+                _purge_loop_device(device)
 
             if os.path.exists(loop_dir):
                 for f in os.listdir(loop_dir):
