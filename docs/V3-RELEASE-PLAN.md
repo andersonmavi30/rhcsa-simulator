@@ -1,690 +1,467 @@
-# RHCSA Simulator V3 Release Plan
+# RHCSA Simulator Unified Roadmap
 
-## Overview
-This document outlines the implementation plan for achieving 100% RHCSA EX200 exam objective coverage.
+**Updated:** 2026-11-21  
+**Target:** RHCSA EX200 on RHEL 10  
+**Primary branch:** `develop`  
+**Reference analysis:** `docs/EXTERNAL-SIMULATOR-GAP-ANALYSIS.md`
 
-**Target:** Complete RHCSA EX200 coverage
-**Current Coverage:** ~75-80%
-**Post-V3 Coverage:** 100%
+> This roadmap supersedes the original V3 plan. Most modules listed in the old
+> plan already exist, while several old items such as RAID, SMB/CIFS, MBR, and
+> server-side services are not part of the current RHEL 10 EX200 core.
+> They may be Challenge content but must not be counted as exam coverage.
 
----
+## Product goal
 
-## 1. Shell Scripting Module (HIGH PRIORITY)
+Build one safe, reproducible, exam-realistic RHCSA platform that supports:
 
-### Why Critical
-- Shell scripting appears on nearly every RHCSA exam
-- Typically 1-2 questions worth 5-10% of total score
-- Tests fundamental Linux understanding
+1. learning concepts;
+2. guided hands-on practice;
+3. adaptive spaced repetition;
+4. full mock exams;
+5. advanced challenge scenarios;
+6. measurable study progress;
+7. real reboot persistence validation;
+8. optional two-node exam simulation.
 
-### New File: `tasks/scripting.py`
+The current Red Hat objective page is the source of truth:
 
-#### Task 1.1: CreateBasicScriptTask
-- **Objective:** Write a script that performs a simple task
-- **Skills tested:**
-  - Shebang line (#!/bin/bash)
-  - Making scripts executable (chmod +x)
-  - Running scripts
-- **Validation:**
-  - Script exists and is executable
-  - Script runs without errors
-  - Script produces expected output
+- https://www.redhat.com/en/services/training/ex200-red-hat-certified-system-administrator-rhcsa-exam
 
-#### Task 1.2: ScriptWithArgumentsTask
-- **Objective:** Write script that accepts positional parameters
-- **Skills tested:**
-  - Using $1, $2, $@, $#
-  - Validating argument count
-- **Example:** Script that creates a user with username from $1
-- **Validation:**
-  - Script accepts arguments
-  - Handles missing arguments gracefully
+## Current baseline
 
-#### Task 1.3: ScriptWithConditionalsTask
-- **Objective:** Write script with if/else logic
-- **Skills tested:**
-  - if/then/else/fi syntax
-  - Test conditions: -f, -d, -e, -z, -n
-  - String and numeric comparisons
-- **Example:** Script that checks if file exists before processing
-- **Validation:**
-  - Correct behavior for both branches
+| Area | Current state |
+|---|---|
+| Content | 188 advertised tasks, 25 categories, 8 RHEL 10 domains |
+| Modes | Learn, Practice, Adaptive, Quick Practice, Mock Exam |
+| Progress | SQLite history, dashboard, SM-2 state, portable progress code |
+| Validation | Safe read-only executor with timeouts and partial-credit checks |
+| Storage practice | Loop devices and authorized real-disk mode |
+| Safety | Mounted/system/shared-VG/partition ownership wipe protections |
+| Remote lab | Linked lab machine, NFS provisioning, remote tasks, Boot Rescue |
+| Browser panel | Token-protected tasks, timer, marks, results, reset, disputes |
+| Reboot | Simulation only; no real reboot/resume/regrade workflow |
+| Multi-node | Partial; no unified two-node paper, lifecycle, or report |
+| Offline repositories | No complete RHEL DVD/Flatpak workflow |
+| Tests | Unit and E2E suites, with strong disk-safety coverage |
 
-#### Task 1.4: ScriptWithLoopsTask
-- **Objective:** Write script with for/while loops
-- **Skills tested:**
-  - for loops (for i in ...; do; done)
-  - while loops
-  - Loop over files, arguments, ranges
-- **Example:** Script that processes all .log files in a directory
-- **Validation:**
-  - Loop executes correct number of times
-  - All items processed
+## Delivery rules
 
-#### Task 1.5: ScriptExitCodesTask
-- **Objective:** Handle exit codes in scripts
-- **Skills tested:**
-  - Checking $? after commands
-  - Using exit with codes
-  - Conditional execution (&&, ||)
-- **Example:** Script that exits with error if command fails
-- **Validation:**
-  - Correct exit code returned
-
-#### Task 1.6: ScriptCommandOutputTask
-- **Objective:** Capture and use command output
-- **Skills tested:**
-  - Command substitution $(command) or `command`
-  - Storing output in variables
-  - Processing output
-- **Example:** Script that counts users and reports
-- **Validation:**
-  - Output correctly captured and used
-
-### Validation Approach
-- Create temporary test scripts
-- Execute with controlled inputs
-- Check exit codes and output
-- Verify file/system state changes
-
-### Dependencies
-- None (new standalone module)
+- RHEL 10 objective coverage takes priority.
+- RHEL 9 remains a compatibility track.
+- Challenge-only topics never count toward EX200 coverage.
+- New features use Python and the current registry/validator architecture.
+- No destructive action bypasses the existing authorization and disk guards.
+- Every feature is delivered through its own branch and pull request.
+- Every task requires setup, validator, cleanup, persistence metadata, and tests.
+- Substantial adapted MIT code retains the required notices.
+- Task wording is written from public objectives, not copied from exam dumps.
 
 ---
 
-## 2. NFS and Autofs Module (HIGH PRIORITY)
+# Milestone 1 — Five modes and Study Tracker
 
-### Why Critical
-- NFS mounting is a core sysadmin skill
-- Autofs appears frequently on exams
-- Tests understanding of network filesystems
+**Priority:** P0  
+**Dependency:** current safety baseline  
+**Status:** next planned work
 
-### New File: `tasks/network_storage.py`
+## 1.1 Formalize the five-mode model
 
-#### Task 2.1: MountNFSShareTask
-- **Objective:** Mount an NFS share manually
-- **Skills tested:**
-  - showmount -e to discover exports
-  - mount -t nfs syntax
-  - NFS mount options (ro, rw, sync, async)
-- **Validation:**
-  - Mount point exists
-  - Share is mounted (check /proc/mounts)
-  - Correct options applied
+The public product model will be:
 
-#### Task 2.2: PersistentNFSMountTask
-- **Objective:** Configure NFS mount in /etc/fstab
-- **Skills tested:**
-  - fstab NFS syntax
-  - _netdev option for network mounts
-  - Mount options for NFS
-- **Validation:**
-  - fstab entry exists with correct format
-  - Mount works after systemctl daemon-reload
+1. **Learn** — concepts, commands, examples, and exam tips.
+2. **Practice** — guided tasks, hints, retries, and immediate feedback.
+3. **Adaptive** — SM-2 selection of weak and overdue categories.
+4. **Exam** — timed, aid-free, weighted, reproducible mock exams.
+5. **Challenge** — troubleshooting, advanced variants, and non-core topics.
 
-#### Task 2.3: ConfigureAutofsMasterTask
-- **Objective:** Configure autofs master map
-- **Skills tested:**
-  - /etc/auto.master syntax
-  - Understanding mount points and map files
-  - Restarting autofs service
-- **Validation:**
-  - auto.master has correct entry
-  - autofs service running
+`Quick Practice` becomes a Practice preset rather than a sixth pillar.
+Boot Rescue remains a specialized lab launched from Practice or Challenge.
 
-#### Task 2.4: ConfigureAutofsDirectMapTask
-- **Objective:** Create autofs direct map for NFS
-- **Skills tested:**
-  - Direct map syntax (/- in master)
-  - Map file format
-  - NFS options in autofs
-- **Validation:**
-  - Map file exists with correct syntax
-  - Mount triggers on access
+### Acceptance criteria
 
-#### Task 2.5: ConfigureAutofsIndirectMapTask
-- **Objective:** Create autofs indirect map
-- **Skills tested:**
-  - Indirect map concept (relative paths)
-  - Wildcard mounts (*)
-  - Home directory automounting
-- **Validation:**
-  - Indirect mount works
-  - Subdirectories auto-mount
+- One consistent menu and CLI vocabulary.
+- Each task declares eligible modes.
+- Exam mode never exposes hints or solutions.
+- Challenge content is visibly separated from RHEL 10 objective coverage.
+- Existing results remain readable after the mode migration.
 
-#### Task 2.6: AutofsHomeDirectoriesTask
-- **Objective:** Configure autofs for NFS home directories
-- **Skills tested:**
-  - /home automounting pattern
-  - Wildcard substitution (&)
-  - Integration with user login
-- **Validation:**
-  - User home directories mount on login
+## 1.2 Study Tracker
 
-### Infrastructure Needed
-- Mock NFS server simulation OR
-- Documentation that user needs NFS server available
-- Helper function to check NFS availability
+Create one learning record that combines:
 
-### Dependencies
-- Networking module (for connectivity)
-- Services module (for autofs service)
+- completed study sessions;
+- time spent per domain/category;
+- accuracy and partial-credit history;
+- SM-2 next-review date;
+- weak areas and repeated mistakes;
+- bookmarked tasks;
+- mock-exam scores and readiness trend;
+- daily/weekly study targets;
+- notes and command-review queue;
+- export to Markdown, CSV/JSON, and an Anki-friendly format;
+- portable backup through the existing progress-code mechanism.
+
+### Acceptance criteria
+
+- The tracker survives reinstall and schema upgrades.
+- Dashboard values are derived from recorded evidence.
+- Import supports preview plus merge/replace.
+- The next recommended session is generated from weak, overdue, and uncovered
+  objectives.
+- Unit tests cover migrations, merge behavior, and corrupted input.
 
 ---
 
-## 3. Package Management Module (HIGH PRIORITY)
+# Milestone 2 — Objective manifest and Doctor
 
-### Why Critical
-- Installing packages is fundamental
-- Repository configuration is commonly tested
-- Every sysadmin needs these skills
+**Priority:** P0  
+**Dependency:** Milestone 1 data model
 
-### New File: `tasks/packages.py`
+## 2.1 RHEL 10 objective manifest
 
-#### Task 3.1: InstallPackageTask
-- **Objective:** Install a package using dnf
-- **Skills tested:**
-  - dnf install syntax
-  - Confirming installation (-y flag)
-  - Verifying installation
-- **Validation:**
-  - rpm -q shows package installed
-  - Package files exist
+Add a machine-readable objective manifest, for example
+`config/objectives_rhel10.json`, mapping:
 
-#### Task 3.2: RemovePackageTask
-- **Objective:** Remove a package
-- **Skills tested:**
-  - dnf remove syntax
-  - Understanding dependencies
-- **Validation:**
-  - Package no longer installed
+`objective -> category -> task IDs -> mode -> persistence -> lab requirements`
 
-#### Task 3.3: InstallPackageGroupTask
-- **Objective:** Install a package group
-- **Skills tested:**
-  - dnf group list
-  - dnf group install
-  - Understanding group structure
-- **Validation:**
-  - Group packages installed
+Add an audit command that reports:
 
-#### Task 3.4: ConfigureRepoTask
-- **Objective:** Add a new repository
-- **Skills tested:**
-  - /etc/yum.repos.d/ structure
-  - Repository file format
-  - gpgcheck, enabled, baseurl options
-- **Validation:**
-  - Repo file exists with correct format
-  - dnf repolist shows new repo
+- objectives with no task;
+- objectives with only one scenario;
+- duplicate or near-duplicate task IDs;
+- Challenge tasks incorrectly counted as exam coverage;
+- tasks missing cleanup, persistence metadata, or tests.
 
-#### Task 3.5: ConfigureRepoFromURLTask
-- **Objective:** Add repository using dnf config-manager
-- **Skills tested:**
-  - dnf config-manager --add-repo
-  - Enabling/disabling repos
-- **Validation:**
-  - Repository added and enabled
+Do not advertise 100% coverage until the manifest passes.
 
-#### Task 3.6: SearchPackageTask
-- **Objective:** Find packages providing a file/feature
-- **Skills tested:**
-  - dnf search
-  - dnf provides
-  - dnf info
-- **Validation:**
-  - Correct package identified
+## 2.2 `doctor` command
 
-#### Task 3.7: DowngradePackageTask
-- **Objective:** Downgrade to previous version
-- **Skills tested:**
-  - dnf downgrade
-  - dnf history
-  - Version management
-- **Validation:**
-  - Older version installed
+Expand the existing preflight into a non-mutating readiness command:
 
-#### Task 3.8: EnableModuleStreamTask
-- **Objective:** Enable a specific module stream
-- **Skills tested:**
-  - dnf module list
-  - dnf module enable
-  - dnf module install
-- **Validation:**
-  - Correct stream enabled
+- supported distribution and detected RHEL major version;
+- Python and required commands;
+- root/systemd/SELinux state;
+- free space and loop-device support;
+- authorized practice-device state;
+- mounted filesystem/PV/VG safety;
+- required packages by selected mode;
+- local ISO/repository availability;
+- optional NFS and linked-machine reachability;
+- SSH trust for two-node work;
+- browser-panel bind/firewall warning;
+- clear green/yellow/red remediation output.
 
-### Validation Approach
-- Use safe, common packages for testing
-- Check rpm database
-- Verify file installation
+## 2.3 Automatic version detection
 
-### Dependencies
-- Network connectivity for repos
-- Consider offline/mock mode
+- Detect RHEL/Rocky/Alma/CentOS Stream major version.
+- Default content to the installed OS version.
+- Retain `--exam-version` only as an explicit development/test override.
+- Refuse incompatible destructive tasks.
+
+### Acceptance criteria
+
+- `doctor` never modifies the host.
+- Tests cover RHEL 9/10, unsupported systems, missing packages, unsafe disks,
+  absent ISO, and unreachable lab machines.
+- Objective audit is deterministic and CI-friendly.
 
 ---
 
-## 4. Disk Partitioning Module (MEDIUM PRIORITY)
+# Milestone 3 — Real post-reboot grading
 
-### Why Critical
-- Foundation for LVM and filesystems
-- Tests understanding of disk structure
-- May appear as part of larger storage tasks
+**Priority:** P0  
+**Dependency:** Doctor and stable session state
 
-### Updates to: `tasks/storage_advanced.py` or new `tasks/partitioning.py`
+Replace the current simulated reboot with an opt-in real workflow while keeping
+simulation available for fast Practice sessions.
 
-#### Task 4.1: CreatePartitionFdiskTask
-- **Objective:** Create partition using fdisk
-- **Skills tested:**
-  - fdisk interactive commands (n, p, w)
-  - Partition types (primary, extended, logical)
-  - MBR partitioning
-- **Validation:**
-  - lsblk shows new partition
-  - Correct size and type
+## Components
 
-#### Task 4.2: CreatePartitionPartedTask
-- **Objective:** Create partition using parted
-- **Skills tested:**
-  - parted commands (mklabel, mkpart)
-  - GPT vs MBR
-  - Partition alignment
-- **Validation:**
-  - Partition exists with correct parameters
+1. Serialize the exam, generated parameters, initial results, deadline, and
+   expected persistence checks to a root-owned state file.
+2. Install a tightly scoped systemd one-shot resume/grading service.
+3. Request explicit confirmation before reboot.
+4. Reboot normally and resume without regenerating tasks.
+5. Revalidate persistent tasks after the host returns.
+6. Record lost points and boot blockers.
+7. Generate a recovery command if automatic resume fails.
+8. Remove transient service/state safely after completion.
 
-#### Task 4.3: CreateGPTPartitionTask
-- **Objective:** Create GPT partition table and partitions
-- **Skills tested:**
-  - GPT advantages and use cases
-  - parted mklabel gpt
-  - Partition naming (part1, part2)
-- **Validation:**
-  - GPT label applied
-  - Partitions created correctly
+## CLI target
 
-#### Task 4.4: ResizePartitionTask
-- **Objective:** Resize an existing partition
-- **Skills tested:**
-  - growpart or parted resizepart
-  - Understanding partition boundaries
-  - Data preservation
-- **Validation:**
-  - Partition resized
-  - Data intact (if applicable)
+- `rhcsa-simulator --exam --real-reboot`
+- `rhcsa-simulator --resume-exam`
+- `rhcsa-simulator --exam --simulate-reboot`
 
-#### Task 4.5: DeletePartitionTask
-- **Objective:** Safely delete a partition
-- **Skills tested:**
-  - Unmounting first
-  - fdisk d command or parted rm
-  - Updating kernel partition table
-- **Validation:**
-  - Partition removed
-  - No orphaned mounts
+### Acceptance criteria
 
-### Safety Considerations
-- Must use practice device only
-- Validate device is not system disk
-- Clear warnings before destructive operations
-
-### Dependencies
-- Device manager (existing)
-- Filesystem module (for format after partition)
+- The task set and random values remain unchanged across reboot.
+- The timer uses monotonic/boot-safe accounting.
+- A correct persistent configuration passes after a real reboot.
+- A transient-only configuration loses the correct checkpoints.
+- Interrupted grading can be resumed idempotently.
+- No credentials are stored world-readable.
+- E2E validation is performed on a disposable RHEL 10 VM.
 
 ---
 
-## 5. Time Services Module (MEDIUM PRIORITY)
+# Milestone 4 — Safe two-node exam controller
 
-### Why Critical
-- Time synchronization is essential for logging, auth
-- chrony is the default in RHEL 8/9
-- Simple but must be understood
+**Priority:** P0  
+**Dependency:** real reboot state model and linked-machine safety
 
-### New File: `tasks/time_services.py`
+Extend the existing linked lab machine rather than importing the reference
+controller unchanged.
 
-#### Task 5.1: ConfigureTimezoneTask
-- **Objective:** Set system timezone
-- **Skills tested:**
-  - timedatectl set-timezone
-  - Listing available timezones
-  - Verifying timezone
-- **Validation:**
-  - timedatectl shows correct timezone
-  - /etc/localtime symlink correct
+## Components
 
-#### Task 5.2: ConfigureChronydTask
-- **Objective:** Configure chrony time synchronization
-- **Skills tested:**
-  - /etc/chrony.conf syntax
-  - NTP server configuration
-  - Restarting chronyd
-- **Validation:**
-  - chrony.conf has correct servers
-  - chronyd service running
-  - chronyc sources shows sync
+- explicit node1/controller and node2/worker roles;
+- safe SSH trust setup and verification;
+- two-node exam blueprint;
+- node-specific task groups and generated parameters;
+- remote setup, validation, cleanup, and restore;
+- independent reboot/resume on each node;
+- combined score and per-node evidence;
+- reachability/timeouts and partial-failure handling;
+- safe reset that preserves real users, network, SSH, and system disks;
+- optional node status/reboot controls in the browser panel.
 
-#### Task 5.3: EnableNTPSyncTask
-- **Objective:** Enable NTP synchronization
-- **Skills tested:**
-  - timedatectl set-ntp true
-  - Verifying sync status
-- **Validation:**
-  - NTP synchronized = yes
+## Initial remote task expansion
 
-#### Task 5.4: SetSystemTimeManuallyTask
-- **Objective:** Set date/time manually (for learning)
-- **Skills tested:**
-  - timedatectl set-time
-  - date command
-  - Understanding when manual setting is needed
-- **Validation:**
-  - Time set correctly
+- SSH key authentication between nodes;
+- secure copy and rsync;
+- hostname and hosts-file resolution;
+- user/group management;
+- timezone/time-client configuration;
+- NFS client and autofs tasks;
+- selected service/firewall/SELinux scenarios.
 
-#### Task 5.5: ConfigureNTPServerPoolTask
-- **Objective:** Configure multiple NTP servers
-- **Skills tested:**
-  - pool vs server directive
-  - iburst option
-  - Fallback servers
-- **Validation:**
-  - Multiple sources configured
+### Acceptance criteria
 
-### Dependencies
-- Services module (chronyd)
-- Network connectivity for NTP
+- One controller command starts, grades, reports, and resets both nodes.
+- Node2 never needs the full simulator installed unless explicitly selected.
+- Combined reports retain per-node checkpoint detail.
+- A failed/unreachable node does not corrupt the controller state.
+- Reset previews every remote action and touches only simulator-owned artifacts.
 
 ---
 
-## 6. Repository Configuration Module (MEDIUM PRIORITY)
+# Milestone 5 — Offline RHEL repositories
 
-### Merged with Package Management (Section 3)
+**Priority:** P1  
+**Dependency:** Doctor
 
-Additional tasks to add:
+## Components
 
-#### Task 6.1: DisableRepoTask
-- **Objective:** Disable a repository
-- **Skills tested:**
-  - dnf config-manager --disable
-  - Editing repo files (enabled=0)
-- **Validation:**
-  - Repo not in dnf repolist
+- detect a matching RHEL DVD ISO/CD-ROM;
+- mount it read-only;
+- create simulator-owned BaseOS/AppStream repo definitions;
+- validate `dnf repolist` and package installation;
+- restore/remove only simulator-owned repo files;
+- prepare or document an offline Flatpak repository workflow;
+- integrate repository state into Doctor and exam prerequisites;
+- never commit or redistribute Red Hat ISO/package content.
 
-#### Task 6.2: SetRepoPriorityTask
-- **Objective:** Configure repository priority
-- **Skills tested:**
-  - priority= in repo file
-  - Understanding repo precedence
-- **Validation:**
-  - Priority correctly set
+### Acceptance criteria
 
-#### Task 6.3: CreateLocalRepoTask
-- **Objective:** Create repository from local directory
-- **Skills tested:**
-  - createrepo command
-  - file:// baseurl
-  - Local package installation
-- **Validation:**
-  - Repo accessible locally
+- A disconnected disposable RHEL 10 VM can complete package tasks.
+- Existing user repositories are preserved.
+- Cleanup removes only files tagged/owned by the simulator.
+- Wrong-version media is rejected clearly.
 
 ---
 
-## 7. SSH Module (LOW PRIORITY)
+# Milestone 6 — Deterministic exam composition
 
-### Why Included
-- SSH is ubiquitous but usually tested implicitly
-- Key-based auth is important for security
+**Priority:** P1  
+**Dependency:** objective manifest
 
-### New File: `tasks/ssh.py`
+Adapt the best composition ideas from the reference simulator:
 
-#### Task 7.1: GenerateSSHKeyTask
-- **Objective:** Generate SSH key pair
-- **Skills tested:**
-  - ssh-keygen command
-  - Key types (rsa, ed25519)
-  - Passphrase handling
-- **Validation:**
-  - Key files exist in ~/.ssh/
-  - Correct permissions (600)
+- deterministic `--seed` support;
+- versioned exam blueprints and domain weighting;
+- no repeated task/scenario in one session;
+- unique generated users, groups, ports, paths, and output files;
+- generic conflict groups;
+- device-slot allocation;
+- at most one destructive whole-disk task per approved device;
+- RHEL-version and lab-requirement filtering;
+- reproducible paper export for debugging without exposing solutions.
 
-#### Task 7.2: ConfigureSSHKeyAuthTask
-- **Objective:** Set up key-based authentication
-- **Skills tested:**
-  - ssh-copy-id
-  - authorized_keys file
-  - Proper permissions
-- **Validation:**
-  - Key in authorized_keys
-  - Permissions correct
+### Acceptance criteria
 
-#### Task 7.3: SSHConfigFileTask
-- **Objective:** Create SSH client config
-- **Skills tested:**
-  - ~/.ssh/config syntax
-  - Host aliases
-  - Connection options
-- **Validation:**
-  - Config file valid syntax
-
-#### Task 7.4: SecureSSHDConfigTask
-- **Objective:** Secure SSH server configuration
-- **Skills tested:**
-  - /etc/ssh/sshd_config
-  - PermitRootLogin, PasswordAuthentication
-  - Restarting sshd
-- **Validation:**
-  - Config options set correctly
+- The same version/seed/blueprint produces the same paper.
+- Different seeds produce meaningful variation.
+- No generated identifiers collide.
+- Storage, network, service, and remote tasks cannot corrupt each other's setup.
+- Blueprint validation runs in CI.
 
 ---
 
-## 8. RAID Module (LOW PRIORITY)
+# Milestone 7 — RHEL 10 task-depth expansion
 
-### Why Included
-- Sometimes appears on exam
-- Good for understanding storage redundancy
-- Less common in cloud environments
+**Priority:** P1  
+**Dependency:** objective audit and composition engine
 
-### Addition to: `tasks/storage_advanced.py`
+The 281 reference directories are a research pool, not a target count.
+Candidates are implemented only after semantic duplicate review.
 
-#### Task 8.1: CreateRAID1Task
-- **Objective:** Create RAID 1 (mirror) array
-- **Skills tested:**
-  - mdadm --create
-  - RAID 1 concept (mirroring)
-  - /proc/mdstat monitoring
-- **Validation:**
-  - RAID device exists
-  - Correct RAID level
-  - Devices synced
+## Batch A — Essential tools
 
-#### Task 8.2: CreateRAID5Task
-- **Objective:** Create RAID 5 array
-- **Skills tested:**
-  - RAID 5 concept (striping with parity)
-  - Minimum device requirements
-  - Spare devices
-- **Validation:**
-  - RAID 5 created
-  - Correct number of devices
+- grep context/count/invert variants;
+- find by mtime/name/type/size;
+- head/tail ranges;
+- sed replacement and uniq counting;
+- bzip2-focused archive workflow;
+- explicit documentation lookup using man/info/`/usr/share/doc`;
+- create/edit text-file scenario.
 
-#### Task 8.3: ManageRAIDArrayTask
-- **Objective:** Add/remove devices from array
-- **Skills tested:**
-  - mdadm --add
-  - mdadm --fail --remove
-  - Rebuilding arrays
-- **Validation:**
-  - Device operations successful
+## Batch B — Scripting
 
-#### Task 8.4: PersistentRAIDConfigTask
-- **Objective:** Make RAID configuration persistent
-- **Skills tested:**
-  - mdadm --detail --scan
-  - /etc/mdadm.conf
-  - Dracut/initramfs updates
-- **Validation:**
-  - Config in mdadm.conf
-  - Array assembles on boot
+- argument-count validation;
+- arithmetic;
+- backup-directory script;
+- file tests;
+- find/process script;
+- standard-input processing;
+- summation loop;
+- user-existence check;
+- while-read loop.
 
----
+## Batch C — Running systems and services
 
-## 9. SMB/CIFS Module (LOW PRIORITY)
+- independent CPU-hog and memory-hog diagnosis;
+- failed-unit diagnosis;
+- journal priority filtering;
+- specific tuned-profile selection;
+- secure directory synchronization;
+- normal reboot/shutdown lifecycle task where safe.
 
-### Why Included
-- Mixed environments need Windows share access
-- Less common than NFS but still relevant
+## Batch D — Storage, filesystems, NFS
 
-### Addition to: `tasks/network_storage.py`
+- filesystem labels and label-based persistent mounts;
+- `nofail` behavior;
+- direct and wildcard autofs maps;
+- read-only NFS client mount;
+- UUID-based LV/filesystem workflow;
+- swap by label/UUID and swap priority;
+- multi-partition GPT workflow;
+- PV and VG removal tasks.
 
-#### Task 9.1: MountCIFSShareTask
-- **Objective:** Mount a Windows/Samba share
-- **Skills tested:**
-  - mount -t cifs syntax
-  - Credentials file
-  - Mount options (username, password, domain)
-- **Validation:**
-  - Share mounted
-  - Accessible
+## Batch E — Networking and remote access
 
-#### Task 9.2: PersistentCIFSMountTask
-- **Objective:** Configure CIFS mount in fstab
-- **Skills tested:**
-  - fstab CIFS syntax
-  - credentials= option
-  - _netdev option
-- **Validation:**
-  - fstab entry correct
-  - Mount works
+- persistent static route;
+- secondary address;
+- NetworkManager autoconnect behavior;
+- cross-node SSH key task;
+- cross-node secure-copy/rsync task;
+- explicit SELinux process-context inspection.
 
-#### Task 9.3: AutofsCIFSTask
-- **Objective:** Configure autofs for CIFS
-- **Skills tested:**
-  - CIFS in autofs maps
-  - Credential handling
-- **Validation:**
-  - Auto-mount on access
+## Batch F — Users, privilege, security
 
----
+- forced password change and minimum age;
+- custom home and primary/supplementary-group variants;
+- group modify/delete tasks;
+- command-scoped sudo, group sudo, and NOPASSWD variants;
+- system-wide and per-user umask;
+- SELinux equivalent-context and context-copy variants.
 
-## Implementation Order
+## Batch G — Challenge-only backlog
 
-### Phase 1: Critical (Do First)
-1. Shell Scripting Module (Section 1)
-2. Package Management Module (Section 3)
-3. NFS/Autofs Module (Section 2)
+- LVM snapshot/rename, PV move, custom VG extent size;
+- NFS/repository/NTP server scenarios;
+- firewall masquerading and sysctl;
+- faillock, immutable files, restrict-su, SELinux user mapping;
+- RAID and SMB/CIFS if still useful for broader administration practice.
 
-### Phase 2: Important
-4. Time Services Module (Section 5)
-5. Disk Partitioning Module (Section 4)
+### Acceptance criteria per task
 
-### Phase 3: Complete Coverage
-6. SSH Module (Section 7)
-7. RAID Module (Section 8)
-8. SMB/CIFS Module (Section 9)
+- official-objective or Challenge classification;
+- no semantic duplicate;
+- randomized but reproducible values;
+- safe setup and teardown;
+- read-only validation;
+- persistence metadata;
+- unit tests;
+- golden-path integration test;
+- verified on RHEL 10.
 
 ---
 
-## Infrastructure Changes Needed
+# Milestone 8 — Reports, browser controls, and integration testing
 
-### 1. Safe Executor Updates
-Add to `config/settings.py` SAFE_VALIDATION_COMMANDS:
-```python
-# New commands for V3
-'rpm', 'dnf', 'yum',           # Package management
-'showmount', 'nfsstat',        # NFS
-'chronyc', 'timedatectl',      # Time services
-'ssh-keygen',                  # SSH (read-only check)
-'mdadm',                       # RAID
-'parted', 'fdisk', 'gdisk',    # Partitioning
-'createrepo',                  # Repo creation
-```
+**Priority:** P2  
+**Dependency:** two-node controller and expanded content
 
-### 2. Device Manager Updates
-- Add detection for RAID arrays
-- Add NFS mount detection
-- Add partition vs whole-disk detection
+## Reports
 
-### 3. New Validator Files
-- `validators/script_validators.py` - Script syntax and execution
-- `validators/package_validators.py` - Package state checking
-- `validators/nfs_validators.py` - NFS mount validation
+- combined node1/node2 score;
+- per-checkpoint evidence;
+- pre/post-reboot comparison;
+- objective-coverage and weak-area summaries;
+- Markdown/HTML/JSON export;
+- Study Tracker linkage.
 
-### 4. Learning Content Updates
-Update `core/learn.py` to add:
-- Shell Scripting section
-- Package Management section
-- NFS/Autofs section
-- Time Services section
-- Partitioning section
+## Browser panel
 
----
+- node status and reachability;
+- safe reboot/shutdown controls with confirmation;
+- combined results;
+- recovery instructions;
+- no unauthenticated state-changing endpoint;
+- bind to localhost by default, with token required for every action.
 
-## Testing Strategy
+## Golden-path testing
 
-### Unit Tests
-- Each new task class should have pytest tests
-- Mock system commands where possible
-- Test validation logic separately
+Adapt the reference solver concept into our test architecture:
 
-### Integration Tests
-- Test on fresh RHEL 9 VM
-- Verify all tasks generate correctly
-- Verify all validations work
+- one known-correct solution driver per high-risk task family;
+- negative test for common false positives;
+- setup -> solve -> validate -> reboot/persist -> cleanup lifecycle;
+- RHEL 10 VM integration matrix;
+- RHEL 9 compatibility regression subset;
+- storage tests only on disposable authorized devices.
 
-### Exam Simulation Tests
-- Create full mock exams using new tasks
-- Time the completion
-- Verify scoring accuracy
+### Acceptance criteria
+
+- Every P0/P1 feature has unit and E2E coverage.
+- High-risk task families pass a real VM golden-path run.
+- Reports reconcile exactly with stored checkpoint results.
+- Browser controls cannot bypass CLI safety checks.
 
 ---
 
-## Documentation Updates
+# Immediate execution queue
 
-### User Guide
-- Add examples for each new task type
-- Document prerequisites (NFS server, etc.)
-- Troubleshooting section
+Complete these in order, one focused unit at a time:
 
-### README Updates
-- Update feature list
-- Add V3 changelog
-- Update coverage percentage
+1. Run and record the complete current unit/E2E baseline.
+2. Define the five-mode contract and migration plan.
+3. Implement/finish Challenge classification and mode eligibility.
+4. Design the Study Tracker schema and migration.
+5. Implement Study Tracker recording, dashboard, and exports.
+6. Add the RHEL 10 objective manifest.
+7. Add the objective coverage audit command.
+8. Implement the read-only `doctor` command.
+9. Design the real-reboot state machine and threat model.
+10. Implement real reboot/resume behind an explicit experimental flag.
+11. Extend the linked machine into the two-node controller.
+12. Add combined reports.
+13. Add offline DVD repositories.
+14. Add deterministic seeds, conflicts, and blueprints.
+15. Begin task expansion in the batches above.
 
----
+## Definition of the “super repo”
 
-## Estimated Effort
+The unified repository is complete when it provides:
 
-| Module | New Tasks | Complexity | Est. Hours |
-|--------|-----------|------------|------------|
-| Shell Scripting | 6 | High | 8-10 |
-| NFS/Autofs | 6 | Medium | 6-8 |
-| Package Management | 8 | Low | 4-6 |
-| Disk Partitioning | 5 | High | 6-8 |
-| Time Services | 5 | Low | 3-4 |
-| SSH | 4 | Low | 3-4 |
-| RAID | 4 | Medium | 4-6 |
-| SMB/CIFS | 3 | Low | 2-3 |
-| **Total** | **41** | - | **36-49** |
-
----
-
-## Version Notes
-
-- **V3.0:** All Phase 1 modules (Scripting, Packages, NFS)
-- **V3.1:** Phase 2 modules (Time, Partitioning)
-- **V3.2:** Phase 3 modules (SSH, RAID, SMB) + polish
-
----
-
-## Risks and Mitigations
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| NFS requires server | High | Document requirements; optional skip |
-| Partitioning can destroy data | Critical | Device manager safety checks |
-| Script validation complexity | Medium | Use subprocess with timeout |
-| Package ops need network | Medium | Support offline mock mode |
-
----
-
-*Document created: 2026-02-10*
-*Target completion: TBD*
-*Author: RHCSA Simulator Team*
+- the five learning/exam modes;
+- a durable Study Tracker;
+- verified RHEL 10 objective coverage;
+- real post-reboot grading;
+- optional safe two-node exams;
+- offline package practice;
+- deterministic and conflict-free papers;
+- broad task variation without duplicate inflation;
+- strong unit, E2E, and golden-path validation;
+- safe cleanup that preserves everything not owned by the simulator.
