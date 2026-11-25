@@ -23,42 +23,49 @@ class BaseTask(ABC):
 
     # Number of whole practice disks this task consumes (0 = none). The exam
     # generator caps the number of disk tasks to the size of the device pool and
-    # hands each one a *distinct* device so they never collide on the same disk.
+    # hands each one a distinct device so they never collide on the same disk.
     disk_slots = 0
 
-    # True if this task establishes a "negative precondition" at exam start so
-    # the candidate must actually do the work (e.g. stop a default-on service,
-    # move an existing artifact aside). The exam loop calls setup_environment()
-    # during preparation and teardown_environment() during cleanup. Without this,
-    # positive-config tasks can pass on pre-existing/default state.
+    # True if this task establishes a negative precondition at exam start so
+    # the candidate must actually do the work.
     has_setup = False
 
-    # Packages this task's fault injection / scenario needs to be fully real
-    # (e.g. httpd for an Apache troubleshooting fault). Session prep collects
-    # these and OFFERS to install what's missing (never installs silently). If
-    # the user declines, the task must degrade gracefully — reduced scenario,
-    # fabricated log evidence, or descriptive-only.
+    # Packages this task's fault injection or scenario needs.
     required_packages = []
 
-    # Exam versions this task is in scope for. None = both. Set it when a
-    # category is in scope for both versions but one task inside it is not —
-    # MBR partitioning is v9-only, because v10's objective reads "List,
-    # create, and delete partitions on GPT disks". Whole categories are
-    # filtered by settings.VERSION_EXCLUDED_CATEGORIES instead.
+    # Exam versions this task is in scope for. None means both versions.
     exam_versions = None
 
-    # True for tasks performed ON the linked second lab machine (over SSH).
-    # They are only offered when a lab machine is linked (Setup → Link second
-    # lab machine); the registry filters them out otherwise.
+    # True for tasks performed on the linked second lab machine.
     requires_lab_machine = False
 
-    # True for tasks that mount/automount from a *real* NFS server
-    # (core/nfs_server.py). Without one configured (Setup → Configure remote
-    # NFS server) there is nothing reachable to mount, so generate() falls
-    # back to a placeholder hostname like server1.example.com that can never
-    # succeed — the task would be unpassable. The registry filters these out
-    # until a server is configured, exactly like requires_lab_machine.
+    # True for tasks that mount or automount from a real NFS server.
     requires_nfs_server = False
+
+    # Mode and provenance metadata.
+    #
+    # exam_eligible:
+    #   The task may appear in Practice, Adaptive and Exam.
+    #
+    # challenge_only:
+    #   The task may appear only in Challenge.
+    #
+    # task_source:
+    #   Educational or functional origin of the task.
+    #
+    # chapter:
+    #   Book or study chapter associated with the task.
+    #
+    # objective:
+    #   RHCSA objective associated with the task.
+    #
+    # These are class attributes so individual task classes can override them
+    # without changing every task constructor.
+    exam_eligible = True
+    challenge_only = False
+    task_source = "official_rhcsa"
+    chapter = None
+    objective = None
 
     def __init__(self, id, category, difficulty, points):
         self.id = id
@@ -76,8 +83,8 @@ class BaseTask(ABC):
         self.exam_tips = []
         self.prerequisites = []
         self.tags = []
-        self.task_order = None  # None = no ordering constraint; int = logical sequence within category
-        self.requires_reboot = False  # True if completing this task requires rebooting the system
+        self.task_order = None
+        self.requires_reboot = False
 
     @abstractmethod
     def generate(self, **params):
@@ -90,40 +97,22 @@ class BaseTask(ABC):
         pass
 
     def provision_devices(self):
-        """Re-bind this task to freshly-allocated practice device(s).
-
-        Called once during exam generation while the device allocator is active.
-        The default re-runs generate(), so any task whose generate() pulls a
-        device via helpers.get_practice_device()/get_swap_practice_device() will
-        pick a *distinct* device from the allocator. Multi-disk tasks override
-        this to allocate the right number of devices.
-        """
+        """Re-bind this task to freshly allocated practice devices."""
         if self.disk_slots:
             self.generate()
 
     def setup_environment(self):
-        """Establish the negative precondition for this task at exam start.
-
-        Override in tasks that would otherwise pass on pre-existing/default
-        state. Return (ok: bool, message: str). Default: no-op.
-        """
+        """Establish the negative precondition for this task at exam start."""
         return True, "no setup needed"
 
     def teardown_environment(self):
-        """Restore whatever setup_environment() changed.
-
-        The default replays the restore record saved via tasks/env_setup.py
-        helpers (resilient to interruption — System Reset and startup recovery
-        use the same record).
-        """
+        """Restore whatever setup_environment() changed."""
         from tasks import env_setup
         return env_setup.restore_and_clear(self.id)
 
     def validate_persistence(self):
         """
         Validate that task results survive a reboot.
-        Called by the reboot engine for tasks with requires_persistence=True.
-        Default: falls through to validate().
         """
         return self.validate()
 
@@ -146,26 +135,42 @@ class BaseTask(ABC):
 
     def to_dict(self):
         return {
-            'id': self.id,
-            'category': self.category,
-            'difficulty': self.difficulty,
-            'points': self.points,
-            'description': self.description,
-            'hints': self.hints,
-            'exam_domain': self.exam_domain,
-            'requires_persistence': self.requires_persistence,
-            'tags': self.tags,
-            'exam_tips': self.exam_tips,
+            "id": self.id,
+            "category": self.category,
+            "difficulty": self.difficulty,
+            "points": self.points,
+            "description": self.description,
+            "hints": self.hints,
+            "exam_domain": self.exam_domain,
+            "requires_persistence": self.requires_persistence,
+            "tags": self.tags,
+            "exam_tips": self.exam_tips,
+            "exam_eligible": getattr(self, "exam_eligible", True),
+            "challenge_only": getattr(self, "challenge_only", False),
+            "task_source": getattr(self, "task_source", "official_rhcsa"),
+            "chapter": getattr(self, "chapter", None),
+            "objective": getattr(self, "objective", None),
         }
 
     def __repr__(self):
-        return f"<Task {self.id}: {self.category} ({self.difficulty}, {self.points}pts, D{self.exam_domain})>"
+        return (
+            f"<Task {self.id}: {self.category} "
+            f"({self.difficulty}, {self.points}pts, D{self.exam_domain})>"
+        )
 
 
 class SimpleTask(BaseTask):
     """Non-abstract implementation for quick task creation."""
 
-    def __init__(self, id, category, difficulty, points, description="", validation_func=None):
+    def __init__(
+        self,
+        id,
+        category,
+        difficulty,
+        points,
+        description="",
+        validation_func=None,
+    ):
         super().__init__(id, category, difficulty, points)
         self.description = description
         self._validation_func = validation_func
@@ -178,10 +183,11 @@ class SimpleTask(BaseTask):
             return self._validation_func()
 
         from core.validator import ValidationResult
+
         return ValidationResult(
             task_id=self.id,
             passed=False,
             score=0,
             max_score=self.points,
-            error_message="No validation function provided"
+            error_message="No validation function provided",
         )
