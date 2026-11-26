@@ -4,9 +4,11 @@ UI dispatcher that loads content from core.content modules.
 """
 
 import logging
+
 from utils import formatters as fmt
 from core.content import ContentRegistry
 from config.exam_objectives import get_objectives
+
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +16,7 @@ logger = logging.getLogger(__name__)
 class LearnMode:
     """Domain-based learn mode with SM-2 indicators and practice integration."""
 
-    def __init__(self, gui_port=None, gui_bind='0.0.0.0'):
+    def __init__(self, gui_port=None, gui_bind="0.0.0.0"):
         self._db = None
         # Task panel — same window every other mode uses, on by default;
         # None (--no-gui) falls back to the terminal only. Only relevant
@@ -27,6 +29,7 @@ class LearnMode:
         if self._db is None:
             try:
                 from core.results_db import get_results_db
+
                 self._db = get_results_db()
             except Exception:
                 self._db = None
@@ -58,6 +61,7 @@ class LearnMode:
                 indicators.append(fmt.error("[WEAK AREA]"))
             elif cat in due_cats:
                 indicators.append(fmt.warning("[DUE FOR REVIEW]"))
+
         # Deduplicate - show most severe per domain
         if any(cat in weak_cats for cat in categories):
             return f" {fmt.error('[WEAK AREA]')}"
@@ -73,16 +77,19 @@ class LearnMode:
 
         while True:
             fmt.clear_screen()
+
             # Learn mode must show the syllabus the candidate will be graded
             # against — v9 has a Containers domain that v10 does not.
             from config import settings
-            EXAM_OBJECTIVES = get_objectives()
+
+            exam_objectives = get_objectives()
             fmt.print_header(
-                f"LEARN MODE - EX200 v{settings.get_exam_version()} Exam Domains")
+                f"LEARN MODE - EX200 v{settings.get_exam_version()} Exam Domains"
+            )
             print()
 
-            for domain_num in sorted(EXAM_OBJECTIVES.keys()):
-                domain = EXAM_OBJECTIVES[domain_num]
+            for domain_num in sorted(exam_objectives.keys()):
+                domain = exam_objectives[domain_num]
                 name = domain["name"]
                 weight = domain["weight"]
                 categories = ContentRegistry.get_categories_for_domain(domain_num)
@@ -90,6 +97,7 @@ class LearnMode:
                     categories, weak_cats, due_cats
                 )
                 cat_count = len(categories)
+
                 fmt.print_menu_option(
                     domain_num,
                     f"{name} ({weight}% weight, {cat_count} topics){indicator}",
@@ -98,7 +106,7 @@ class LearnMode:
             print()
             fmt.print_menu_option("Q", "Back to Main Menu")
 
-            max_domain = max(EXAM_OBJECTIVES.keys())
+            max_domain = max(exam_objectives.keys())
             choice = input(f"\nSelect domain (1-{max_domain} or Q): ").strip()
 
             if choice.lower() == "q":
@@ -106,7 +114,7 @@ class LearnMode:
 
             try:
                 domain_num = int(choice)
-                if domain_num in EXAM_OBJECTIVES:
+                if domain_num in exam_objectives:
                     self._show_domain_topics(domain_num, weak_cats, due_cats)
                 else:
                     print(fmt.error(f"Invalid selection. Choose 1-{max_domain}."))
@@ -144,6 +152,7 @@ class LearnMode:
                 topic = ContentRegistry.get_topic(cat)
                 if not topic:
                     continue
+
                 indicator = ""
                 if cat in weak_cats:
                     indicator = f" {fmt.error('[WEAK AREA]')}"
@@ -170,12 +179,12 @@ class LearnMode:
                     input("Press Enter to continue...")
             except ValueError:
                 print(fmt.error("Please enter a number or B"))
-                input("Press Enter to continue...")
 
     def _get_category_stats(self, category):
         """Get a brief stats string for a category."""
         if not self.db:
             return ""
+
         try:
             stats = self.db.get_category_stats(category)
             if stats and stats["attempts"] > 0:
@@ -185,7 +194,40 @@ class LearnMode:
                 return f" {fmt.dim(f'({pct}% in {attempts} attempts)')}"
         except Exception:
             pass
+
         return ""
+
+    def _show_study_metadata(self, category, topic):
+        """Display the study mapping attached to a learning topic."""
+        metadata = ContentRegistry.get_study_metadata(category) or topic
+
+        print(fmt.bold("STUDY MAP:"))
+        print(f"  Study ID: {metadata.get('study_id', category)}")
+
+        domain = metadata.get("domain")
+        domain_name = metadata.get("domain_name")
+        if domain and domain_name:
+            print(f"  Exam domain: {domain} - {domain_name}")
+        elif domain:
+            print(f"  Exam domain: {domain}")
+
+        sources = metadata.get("content_sources", [])
+        if sources:
+            print("  Sources:")
+            for source in sources:
+                print(f"    - {source}")
+
+        sander_chapter = metadata.get("sander_chapter")
+        if sander_chapter:
+            print(f"  Sander van Vugt chapter: {sander_chapter}")
+
+        objectives = metadata.get("official_objectives", [])
+        if objectives:
+            print("  Official objectives:")
+            for objective in objectives:
+                print(f"    - {objective}")
+
+        print()
 
     def _display_topic(self, category):
         """Display learning content for a topic."""
@@ -197,6 +239,9 @@ class LearnMode:
 
         fmt.clear_screen()
         fmt.print_header(f"LEARN: {topic['name']}")
+        print()
+
+        self._show_study_metadata(category, topic)
 
         # Explanation
         print(fmt.bold("CONCEPT OVERVIEW:"))
@@ -206,6 +251,7 @@ class LearnMode:
         # Commands
         print(fmt.bold("ESSENTIAL COMMANDS:"))
         print("=" * 70)
+
         for cmd in topic["commands"]:
             print()
             print(fmt.success(f"  {cmd['name']}"))
@@ -214,25 +260,33 @@ class LearnMode:
             print(f"    {fmt.info(cmd['syntax'])}")
             print()
             print(fmt.bold("  Example:"))
+
             for line in cmd["example"].split("\n"):
                 print(f"    $ {line}")
+
             print()
             print(fmt.bold("  Flags:"))
+
             for flag, description in cmd["flags"].items():
                 print(f"    {fmt.warning(flag):20} -> {description}")
+
             print()
 
         # Common Mistakes
         print("=" * 70)
         print(fmt.bold("COMMON MISTAKES:"))
+
         for i, mistake in enumerate(topic["common_mistakes"], 1):
             print(f"  {i}. {fmt.error('X')} {mistake}")
+
         print()
 
         # Exam Tricks
         print(fmt.bold("EXAM TIPS:"))
+
         for i, trick in enumerate(topic["exam_tricks"], 1):
             print(f"  {i}. {fmt.warning('!')} {trick}")
+
         print()
 
         # Navigation
@@ -272,35 +326,46 @@ class LearnMode:
             from core.practice import PracticeSession
             from core import task_gui
 
-            session = PracticeSession(gui_port=self.gui_port, gui_bind=self.gui_bind)
+            session = PracticeSession(
+                gui_port=self.gui_port,
+                gui_bind=self.gui_bind,
+            )
             session.category = category
             session.difficulty = "exam"
             session.task_count = len(tasks)
             session.tasks = tasks
 
-            session.panel = task_gui.open_panel(tasks, self.gui_port, self.gui_bind)
+            session.panel = task_gui.open_panel(
+                tasks,
+                self.gui_port,
+                self.gui_bind,
+            )
+
             try:
                 for i, task in enumerate(tasks, 1):
                     session._run_practice_task(task, i, len(tasks))
             finally:
                 task_gui.close_panel(session.panel)
+
         except ImportError as e:
             logger.warning(f"Could not launch practice: {e}")
             print(fmt.warning("Practice mode not available."))
             input("Press Enter to continue...")
+
         except Exception as e:
             logger.error(f"Practice error: {e}")
             print(fmt.error(f"Error launching practice: {e}"))
             input("Press Enter to continue...")
 
 
-def run_learn_mode(category=None, gui_port=None, gui_bind='0.0.0.0'):
+def run_learn_mode(category=None, gui_port=None, gui_bind="0.0.0.0"):
     """Run learn mode (convenience function).
 
     Args:
-        category: Optional category to jump directly to
+        category: Optional category to jump directly to.
     """
     mode = LearnMode(gui_port=gui_port, gui_bind=gui_bind)
+
     if category:
         mode._display_topic(category)
     else:

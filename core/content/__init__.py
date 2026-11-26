@@ -6,7 +6,11 @@ Loads domain-based learning content modules aligned with EX200 v10 exam objectiv
 import importlib
 import logging
 
+from config.exam_objectives import get_objectives
+
+
 logger = logging.getLogger(__name__)
+
 
 # Domain module mapping
 _DOMAIN_MODULES = {
@@ -29,6 +33,41 @@ class ContentRegistry:
     _initialized = False
 
     @classmethod
+    def _enrich_topic(cls, category, topic, domain_num):
+        """
+        Add common study metadata without replacing topic-specific content.
+
+        Existing domain files remain focused on educational material. This
+        method adds the metadata needed by Learn, Practice and Study Tracker.
+        """
+        if not isinstance(topic, dict):
+            return topic
+
+        objectives = get_objectives().get(domain_num, {})
+
+        enriched = dict(topic)
+        enriched.setdefault("study_id", category)
+        enriched.setdefault("domain", domain_num)
+        enriched.setdefault(
+            "domain_name",
+            objectives.get("name", ""),
+        )
+        enriched.setdefault(
+            "official_objectives",
+            list(objectives.get("objectives", [])),
+        )
+        enriched.setdefault(
+            "content_sources",
+            [
+                "official_rhcsa",
+                "sander_van_vugt",
+            ],
+        )
+        enriched.setdefault("sander_chapter", None)
+
+        return enriched
+
+    @classmethod
     def initialize(cls):
         """Load all domain content modules."""
         if cls._initialized:
@@ -38,18 +77,31 @@ class ContentRegistry:
             try:
                 mod = importlib.import_module(module_path)
                 content = getattr(mod, "CONTENT", {})
-                cls._content.update(content)
+
+                for category, topic in content.items():
+                    cls._content[category] = cls._enrich_topic(
+                        category,
+                        topic,
+                        domain_num,
+                    )
+
                 logger.debug(
-                    f"Loaded domain {domain_num}: {len(content)} categories"
+                    f"Loaded domain {domain_num}: "
+                    f"{len(content)} categories"
                 )
-            except ImportError as e:
-                logger.warning(f"Could not load {module_path}: {e}")
-            except Exception as e:
-                logger.error(f"Error loading {module_path}: {e}")
+            except ImportError as exc:
+                logger.warning(
+                    f"Could not load {module_path}: {exc}"
+                )
+            except Exception as exc:
+                logger.error(
+                    f"Error loading {module_path}: {exc}"
+                )
 
         cls._initialized = True
         logger.info(
-            f"ContentRegistry initialized: {len(cls._content)} categories"
+            f"ContentRegistry initialized: "
+            f"{len(cls._content)} categories"
         )
 
     @classmethod
@@ -68,15 +120,47 @@ class ContentRegistry:
     def get_categories_for_domain(cls, domain_number):
         """Get category keys belonging to a specific domain."""
         cls.initialize()
-        from config.exam_objectives import get_objectives
-        EXAM_OBJECTIVES = get_objectives()
 
-        domain = EXAM_OBJECTIVES.get(domain_number, {})
-        return [c for c in domain.get("categories", []) if c in cls._content]
+        objectives = get_objectives()
+        domain = objectives.get(domain_number, {})
+
+        return [
+            category
+            for category in domain.get("categories", [])
+            if category in cls._content
+        ]
 
     @classmethod
     def get_domain_content(cls, domain_number):
         """Get all content dicts for a domain, keyed by category."""
         cls.initialize()
+
         categories = cls.get_categories_for_domain(domain_number)
-        return {cat: cls._content[cat] for cat in categories}
+
+        return {
+            category: cls._content[category]
+            for category in categories
+        }
+
+    @classmethod
+    def get_study_metadata(cls, category):
+        """
+        Return only the common study metadata for a category.
+        """
+        topic = cls.get_topic(category)
+
+        if not topic:
+            return None
+
+        return {
+            "study_id": topic.get("study_id"),
+            "domain": topic.get("domain"),
+            "domain_name": topic.get("domain_name"),
+            "official_objectives": list(
+                topic.get("official_objectives", [])
+            ),
+            "content_sources": list(
+                topic.get("content_sources", [])
+            ),
+            "sander_chapter": topic.get("sander_chapter"),
+        }
